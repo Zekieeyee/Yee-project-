@@ -1,0 +1,1218 @@
+Imports System.Drawing.Printing
+Imports MySql.Data.MySqlClient
+Imports System.IO
+
+Public Class Form1
+    Dim selectedID As Integer
+    Dim currentOrderID As Integer
+
+    ' Cart System Variables
+    Private cartItems As New DataTable()
+    Private cartTotal As Decimal = 0
+    Private WithEvents PrintReceiptDocument As New PrintDocument()
+
+    ' Database connection string
+    Dim connString As String = "server=localhost;userid=root;password=;database=printshop_new;"
+    Dim con As New MySqlConnection(connString)
+    Dim dt As New DataTable()
+
+    ' =========================
+    ' Form Load
+    ' =========================
+    ' Show floating notification
+    Private Sub ShowNotification(message As String, msgType As String)
+        Dim notif As New Form()
+        notif.FormBorderStyle = FormBorderStyle.None
+        notif.StartPosition = FormStartPosition.Manual
+        notif.Location = New Point(Me.Location.X + (Me.Width - 300) \ 2, Me.Location.Y + Me.Height - 120)
+        notif.Size = New Size(300, 50)
+        notif.TopMost = True
+
+        Select Case msgType
+            Case "success"
+                notif.BackColor = Color.FromArgb(0, 120, 0)
+            Case "error"
+                notif.BackColor = Color.FromArgb(180, 0, 0)
+            Case "warning"
+                notif.BackColor = Color.FromArgb(200, 100, 0)
+            Case Else
+                notif.BackColor = Color.FromArgb(50, 50, 50)
+        End Select
+
+        Dim lbl As New Label()
+        lbl.Text = message
+        lbl.ForeColor = Color.White
+        lbl.Font = New Font("Segoe UI", 10, FontStyle.Bold)
+        lbl.TextAlign = ContentAlignment.MiddleCenter
+        lbl.Dock = DockStyle.Fill
+
+        notif.Controls.Add(lbl)
+        notif.Show()
+
+        Dim t As New Timer()
+        t.Interval = 2000
+        AddHandler t.Tick, Sub(s, args)
+                               notif.Close()
+                               t.Stop()
+                           End Sub
+        t.Start()
+    End Sub
+    ' =========================
+    ' EXPORT TO EXCEL
+    ' =========================
+
+    ' Placeholder / Indicator para sa TextBox
+    Private Sub SetPlaceholder(txt As TextBox, placeholderText As String)
+        txt.Text = placeholderText
+        txt.ForeColor = Color.Gray
+        txt.Tag = placeholderText
+
+        AddHandler txt.Enter, Sub(sender As Object, e As EventArgs)
+                                  Dim tb As TextBox = DirectCast(sender, TextBox)
+                                  If tb.Text = tb.Tag.ToString() Then
+                                      tb.Text = ""
+                                      tb.ForeColor = Color.Black
+                                  End If
+                              End Sub
+
+        AddHandler txt.Leave, Sub(sender As Object, e As EventArgs)
+                                  Dim tb As TextBox = DirectCast(sender, TextBox)
+                                  If String.IsNullOrWhiteSpace(tb.Text) Then
+                                      tb.Text = tb.Tag.ToString()
+                                      tb.ForeColor = Color.Gray
+                                  End If
+                              End Sub
+    End Sub
+    Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        ' I-maximize ang form para full screen
+        Me.WindowState = FormWindowState.Maximized
+
+        dgvSales.RowHeadersVisible = False
+        dgvPrices.RowHeadersVisible = False
+
+        ' Setup Placeholders
+        SetPlaceholder(txtReceiveMoney, "Enter amount received")
+        SetPlaceholder(txtPrice, "Price will appear here")
+
+        LoadData()
+        LoadPrices()
+
+        ' Preview Order ID (para makita ng admin)
+        Dim todayCode As String = DateTime.Now.ToString("ddMMyy")
+        currentOrderID = todayCode & "1"
+        lblOrderId.Text = currentOrderID
+
+        ' SET DEFAULT DATES
+        dtpFromDate.Value = New DateTime(DateTime.Now.Year, DateTime.Now.Month, 1)
+        dtpToDate.Value = DateTime.Now.Date
+
+        ' Load initial report
+        LoadSalesReportByDateRange(dtpFromDate.Value, dtpToDate.Value)
+
+        ' ========== I-ADJUST ANG COLUMNS PARA MAGKASYA ==========
+        dgvSales.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+
+        If dgvSales.Columns.Count > 0 Then
+            dgvSales.Columns("ID").FillWeight = 3
+            dgvSales.Columns("ServiceType").FillWeight = 12
+            dgvSales.Columns("Size").FillWeight = 5
+            dgvSales.Columns("Quantity").FillWeight = 4
+            dgvSales.Columns("Price").FillWeight = 6
+            dgvSales.Columns("TotalAmount").FillWeight = 8
+            dgvSales.Columns("SaleDate").FillWeight = 8
+            dgvSales.Columns("SaleTime").FillWeight = 7
+            dgvSales.Columns("AmountPaid").FillWeight = 8
+            dgvSales.Columns("ChangeAmount").FillWeight = 8
+            dgvSales.Columns("OrderID").FillWeight = 8
+        End If
+
+        ' ========== CART SYSTEM SETUP ==========
+        grpCart.Visible = False
+
+        ' Setup Cart DataTable
+        cartItems.Columns.Add("ServiceType", GetType(String))
+        cartItems.Columns.Add("Size", GetType(String))
+        cartItems.Columns.Add("Quantity", GetType(Integer))
+        cartItems.Columns.Add("Price", GetType(Decimal))
+        cartItems.Columns.Add("Total", GetType(Decimal))
+
+        dgvCart.DataSource = cartItems
+        dgvCart.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
+
+        dgvCart.Columns("ServiceType").HeaderText = "Service Type"
+        dgvCart.Columns("Size").HeaderText = "Size"
+        dgvCart.Columns("Quantity").HeaderText = "Qty"
+        dgvCart.Columns("Price").HeaderText = "Price"
+        dgvCart.Columns("Total").HeaderText = "Total"
+
+        ' Real-time clock setup
+        lblRunningTime.Text = DateTime.Now.ToString("HH:mm:ss")
+        lblRunningTime.Visible = False
+
+        ' Automated Date
+        dtpSaleDate.Enabled = False
+        dtpSaleDate.Value = DateTime.Now
+
+        ' I-disable muna ang Done button
+        btnDone.Enabled = False
+    End Sub
+    Private Sub btnFilter_Click(sender As Object, e As EventArgs) Handles btnFilter.Click
+        ' Validate na hindi baligtad ang dates
+        If dtpFromDate.Value > dtpToDate.Value Then
+            MessageBox.Show("From Date cannot be later than To Date. Please correct.",
+                        "Invalid Date Range",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning)
+            Return
+        End If
+
+        LoadSalesReportByDateRange(dtpFromDate.Value, dtpToDate.Value)
+    End Sub
+    Private Sub Timer1_Tick(sender As Object, e As EventArgs) Handles Timer1.Tick
+        ' I-update ang oras bawat segundo (real-time)
+        lblRunningTime.Text = DateTime.Now.ToString("hh:mm:ss tt")
+
+        ' Optional: Kung gusto mo rin ng date sa ibabaw
+        lblCurrentDate.Text = DateTime.Now.ToString("dddd, MMMM dd, yyyy")
+    End Sub
+    Private Sub btnThisMonth_Click(sender As Object, e As EventArgs) Handles btnThisMonth.Click
+        Dim firstOfMonth As DateTime = New DateTime(DateTime.Now.Year, DateTime.Now.Month, 1)
+        Dim lastOfMonth As DateTime = firstOfMonth.AddMonths(1).AddDays(-1)
+
+        dtpFromDate.Value = firstOfMonth
+        dtpToDate.Value = lastOfMonth
+        LoadSalesReportByDateRange(dtpFromDate.Value, dtpToDate.Value)
+    End Sub
+    Private Sub btnToday_Click(sender As Object, e As EventArgs) Handles btnToday.Click
+        dtpFromDate.Value = DateTime.Now.Date
+        dtpToDate.Value = DateTime.Now.Date
+        LoadSalesReportByDateRange(dtpFromDate.Value, dtpToDate.Value)
+    End Sub
+
+    ' =========================
+    ' LOAD ALL SALES (NO DATE FILTER)
+    ' =========================
+    ' =========================
+    ' LOAD ALL SALES (NO DATE FILTER)
+    ' =========================
+    Private Sub LoadAllSales()
+        Try
+            Dim sql As String = "SELECT ID, ServiceType, Size, Quantity, Price, TotalAmount, 
+                                        SaleDate, 
+                                        DATE_FORMAT(SaleTime, '%h:%i:%s %p') AS SaleTime,
+                                        AmountPaid, ChangeAmount, OrderID 
+                                 FROM Sales 
+                                 ORDER BY SaleDate DESC, SaleTime DESC"
+
+            Using cmd As New MySqlCommand(sql, con)
+                Dim da As New MySqlDataAdapter(cmd)
+                Dim dt As New DataTable()
+                da.Fill(dt)
+
+                dgvSales.DataSource = dt
+                ComputeReportTotal(dt)
+
+                ' I-format ang column headers
+                If dgvSales.Columns.Count > 0 Then
+                    dgvSales.Columns("SaleTime").HeaderText = "Time"
+                End If
+
+                ' Reset date pickers
+                dtpFromDate.Value = New DateTime(DateTime.Now.Year, DateTime.Now.Month, 1)
+                dtpToDate.Value = DateTime.Now.Date
+            End Using
+        Catch ex As Exception
+            MessageBox.Show("Error loading all sales: " & ex.Message)
+        End Try
+    End Sub
+    Private Sub btnAllSales_Click(sender As Object, e As EventArgs) Handles btnAllSales.Click
+        LoadAllSales()
+    End Sub
+
+    ' =========================
+    ' LOAD SALES REPORT BY DATE RANGE (From - To)
+    ' =========================
+    Private Sub LoadSalesReportByDateRange(fromDate As Date, toDate As Date)
+        Try
+            ' Convert to end of day para kasama ang buong araw ng "to date"
+            Dim toDateEnd As Date = toDate.Date.AddDays(1).AddSeconds(-1)
+
+            ' SQL na may formatted time (12-hour format na may am/pm)
+            Dim sql As String = "SELECT ID, ServiceType, Size, Quantity, Price, TotalAmount, 
+                                        SaleDate, 
+                                        DATE_FORMAT(SaleTime, '%h:%i:%s %p') AS SaleTime,
+                                        AmountPaid, ChangeAmount, OrderID 
+                                 FROM Sales 
+                                 WHERE SaleDate BETWEEN @FromDate AND @ToDate 
+                                 ORDER BY SaleDate DESC, SaleTime DESC"
+
+            Using cmd As New MySqlCommand(sql, con)
+                cmd.Parameters.AddWithValue("@FromDate", fromDate.ToString("yyyy-MM-dd"))
+                cmd.Parameters.AddWithValue("@ToDate", toDateEnd.ToString("yyyy-MM-dd"))
+
+                Dim da As New MySqlDataAdapter(cmd)
+                Dim dt As New DataTable()
+                da.Fill(dt)
+
+                dgvSales.DataSource = dt
+                ComputeReportTotal(dt)
+
+                ' I-format ang column headers (optional)
+                If dgvSales.Columns.Count > 0 Then
+                    dgvSales.Columns("SaleTime").HeaderText = "Time"
+                End If
+
+            End Using
+        Catch ex As Exception
+            MessageBox.Show("Error loading report: " & ex.Message)
+        End Try
+    End Sub
+
+    ' =========================
+    ' Logout
+    ' =========================
+    Private Sub BtnLogout_Click(sender As Object, e As EventArgs) Handles btnLogout.Click
+        If MessageBox.Show("Are you sure you want to logout?", "Confirm Logout",
+                       MessageBoxButtons.YesNo, MessageBoxIcon.Question) = DialogResult.Yes Then
+
+            ' Show login form
+            Dim login As New Form3
+            login.Show()
+
+            ' Close current form completely
+            Me.Close()
+
+        End If
+    End Sub
+
+    ' =========================
+    ' Load Sales Data
+    ' =========================
+    ' =========================
+    ' Load Sales Data
+    ' =========================
+    Private Sub LoadData()
+        Try
+            Dim sql As String = "SELECT ID, ServiceType, Size, Quantity, Price, TotalAmount, 
+                                        SaleDate, 
+                                        DATE_FORMAT(SaleTime, '%h:%i:%s %p') AS SaleTime,
+                                        AmountPaid, ChangeAmount, OrderID 
+                                 FROM Sales 
+                                 ORDER BY SaleDate DESC, SaleTime DESC"
+
+            Dim da As New MySqlDataAdapter(sql, con)
+            Dim dt As New DataTable()
+            da.Fill(dt)
+            dgvSales.DataSource = dt
+
+            ' I-format ang column headers
+            If dgvSales.Columns.Count > 0 Then
+                dgvSales.Columns("SaleTime").HeaderText = "Time"
+            End If
+        Catch ex As Exception
+            MessageBox.Show("Error loading data: " & ex.Message)
+        End Try
+    End Sub
+
+    ' =========================
+    ' Load Prices
+    ' =========================
+    Private Sub LoadPrices()
+        Dim dtPrice As New DataTable()
+        Dim da As New MySqlDataAdapter("SELECT * FROM Prices", con)
+        da.Fill(dtPrice)
+        dgvPrices.DataSource = dtPrice
+    End Sub
+
+    ' =========================
+    ' Compute Totals
+    ' =========================
+    Private Sub ComputeTotal()
+        If IsNumeric(txtPrice.Text) Then
+            Dim total As Decimal = numQuantity.Value * Convert.ToDecimal(txtPrice.Text)
+        End If
+    End Sub
+
+    Private Sub ComputeReportTotal(dt As DataTable)
+        Dim totalSales As Decimal = 0
+        For Each row As DataRow In dt.Rows
+            totalSales += Convert.ToDecimal(row("TotalAmount"))
+        Next
+    End Sub
+
+    ' =========================
+    ' Get Price for Service/Size
+    ' =========================
+    Private Sub GetPrice()
+
+        If cmbServiceType.Text = "" Or cmbSize.Text = "" Then
+            txtPrice.Clear()
+            Exit Sub
+        End If
+
+        Try
+            If con.State = ConnectionState.Open Then con.Close()
+
+            Dim service As String = cmbServiceType.Text.Trim()
+
+            If service = "Type of Service" Then
+                txtPrice.Clear()
+                Exit Sub
+            End If
+
+
+
+            Dim cmd As New MySqlCommand("SELECT Price FROM Prices WHERE ServiceType=@service AND Size=@size", con)
+
+            cmd.Parameters.AddWithValue("@service", service)
+            cmd.Parameters.AddWithValue("@size", cmbSize.Text.Trim())
+
+            con.Open()
+
+            Dim result = cmd.ExecuteScalar()
+
+            If result IsNot Nothing AndAlso Not IsDBNull(result) Then
+                txtPrice.Text = Convert.ToDecimal(result).ToString("0.00")
+            Else
+                txtPrice.Text = "0.00"
+            End If
+
+            con.Close()
+
+        Catch ex As Exception
+            MessageBox.Show(ex.Message)
+            If con.State = ConnectionState.Open Then con.Close()
+        End Try
+
+    End Sub
+
+    ' =========================
+    ' Save Sales Record
+    ' =========================
+    Private Sub btnCreateCart_Click(sender As Object, e As EventArgs) Handles btnCreateCart.Click
+        ' I-PAKITA ang grpCart
+        grpCart.Visible = True
+        grpCart.BringToFront()
+
+        ' I-preview ang susunod na Order ID
+        Using con As New MySqlConnection(connString)
+            con.Open()
+            Using cmd As New MySqlCommand("SELECT IFNULL(MAX(OrderID), 100000) + 1 FROM sales", con)
+                currentOrderID = Convert.ToInt32(cmd.ExecuteScalar())
+            End Using
+            con.Close()
+        End Using
+
+        lblOrderId.Text = currentOrderID.ToString()
+
+        ' Start ang real-time clock
+        Timer1.Enabled = True
+
+        ' I-set ang initial values
+        lblRunningTime.Text = DateTime.Now.ToString("hh:mm:ss tt")
+        lblCurrentDate.Text = DateTime.Now.ToString("dddd, MMMM dd, yyyy")
+
+        ' I-visible ang mga label
+        lblRunningTime.Visible = True
+        lblCurrentDate.Visible = True
+
+        ShowNotification("Cart is now open. Order ID: " & currentOrderID, "success")
+    End Sub
+    ' =========================
+    ' Edit Sales Record
+    ' =========================
+    Private Sub BtnEdit_Click(sender As Object, e As EventArgs) Handles btnEdit.Click
+        If selectedID = 0 Then
+            MessageBox.Show("Please select a record to edit.")
+            Exit Sub
+        End If
+
+        Try
+            Dim total As Decimal = numQuantity.Value * Val(txtPrice.Text)
+            con.Open()
+            Dim query As String = "UPDATE Sales SET ServiceType=@ServiceType, Quantity=@Quantity, Price=@Price, TotalAmount=@TotalAmount, SaleDate=@SaleDate WHERE ID=@ID"
+            Dim cmd As New MySqlCommand(query, con)
+            cmd.Parameters.AddWithValue("@ServiceType", cmbServiceType.Text)
+            cmd.Parameters.AddWithValue("@Quantity", numQuantity.Value)
+            cmd.Parameters.AddWithValue("@Price", Val(txtPrice.Text))
+            cmd.Parameters.AddWithValue("@TotalAmount", total)
+            cmd.Parameters.AddWithValue("@SaleDate", dtpSaleDate.Value.ToString("yyyy-MM-dd"))
+            cmd.Parameters.AddWithValue("@ID", selectedID)
+            cmd.ExecuteNonQuery()
+            con.Close()
+            MessageBox.Show("Record Updated Successfully!")
+            LoadData()
+        Catch ex As Exception
+            MessageBox.Show("Error: " & ex.Message)
+            con.Close()
+        End Try
+    End Sub
+
+    ' =========================
+    ' Refresh
+    ' =========================
+    Private Sub BtnRefresh_Click(sender As Object, e As EventArgs) Handles btnRefresh.Click
+        LoadData()
+    End Sub
+
+    ' =========================
+    ' Cell Click for Selection
+    ' =========================
+    Private Sub dgvSales_CellClick(sender As Object, e As DataGridViewCellEventArgs) Handles dgvSales.CellClick
+        If e.RowIndex < 0 Then Exit Sub
+        Dim row As DataGridViewRow = dgvSales.Rows(e.RowIndex)
+
+        ' Set selectedID and populate fields
+        If Not IsDBNull(row.Cells("ID").Value) Then
+            selectedID = Convert.ToInt32(row.Cells("ID").Value)
+            cmbServiceType.Text = row.Cells("ServiceType").Value.ToString()
+            numQuantity.Value = Convert.ToDecimal(row.Cells("Quantity").Value)
+            txtPrice.Text = row.Cells("Price").Value.ToString()
+        End If
+
+        ' Check multiple services
+        If Not IsDBNull(row.Cells("OrderID").Value) Then
+            Dim orderID As Integer = Convert.ToInt32(row.Cells("OrderID").Value)
+            CheckOrderServices(orderID)
+        End If
+    End Sub
+
+    ' =========================
+    ' Check Multiple Services
+    ' =========================
+    Private Sub CheckOrderServices(orderID As Integer)
+        Try
+            Dim da As New MySqlDataAdapter("SELECT ServiceType, Size, Quantity, Price, TotalAmount FROM Sales WHERE OrderID=@OrderID", con)
+            da.SelectCommand.Parameters.AddWithValue("@OrderID", orderID)
+            Dim dt As New DataTable
+            da.Fill(dt)
+            If dt.Rows.Count > 1 Then
+                MessageBox.Show("This transaction contains multiple services (" & dt.Rows.Count & ").")
+            Else
+                MessageBox.Show("This transaction contains only one service.")
+            End If
+        Catch ex As Exception
+            MessageBox.Show(ex.Message)
+        End Try
+    End Sub
+    Private Sub LoadSizes(serviceType As String)
+        Try
+            cmbSize.Items.Clear()
+
+            Dim cmd As New MySqlCommand("SELECT Size FROM Prices WHERE ServiceType=@service", con)
+            cmd.Parameters.AddWithValue("@service", serviceType)
+
+            If con.State = ConnectionState.Open Then con.Close()
+            con.Open()
+
+            Dim reader = cmd.ExecuteReader()
+
+            While reader.Read()
+                cmbSize.Items.Add(reader("Size").ToString())
+            End While
+
+            con.Close()
+
+        Catch ex As Exception
+            MessageBox.Show(ex.Message)
+        End Try
+    End Sub
+    ' =========================
+    ' Get Price When Combo Changes
+    ' =========================
+    Private Sub cmbServiceType_SelectedIndexChanged(sender As Object, e As EventArgs) Handles cmbServiceType.SelectedIndexChanged
+        LoadSizes(cmbServiceType.Text)
+        cmbSize.Items.Clear()
+
+        ' ✅ Photocopy = PHOTO SIZES
+        If cmbServiceType.Text = "Photocopy" Then
+            cmbSize.Items.AddRange({"1x1", "2x2", "3x3", "3R", "4R"})
+
+            ' ✅ Color Print = DOCUMENT SIZES
+        ElseIf cmbServiceType.Text = "Color Print" Then
+            cmbSize.Items.AddRange({"Short", "Long", "A4", "Legal"})
+
+            ' ✅ Black & White Print = DOCUMENT SIZES
+        ElseIf cmbServiceType.Text = "Black & White Print" Then
+            cmbSize.Items.AddRange({"Short", "Long", "A4", "Legal"})
+
+            ' ✅ Tarpaulin
+        ElseIf cmbServiceType.Text = "Tarpaulin" Then
+            cmbSize.Items.AddRange({"Small", "Medium", "Large"})
+        End If
+
+        cmbSize.SelectedIndex = -1
+        cmbSize.Text = "Select Size"
+        txtPrice.Clear()
+
+    End Sub
+
+    Private Sub cmbSize_SelectedIndexChanged(sender As Object, e As EventArgs) Handles cmbSize.SelectedIndexChanged
+        GetPrice()
+        ComputeTotal()
+    End Sub
+
+
+    Private Sub TxtPrice_TextChanged(sender As Object, e As EventArgs) Handles txtPrice.TextChanged
+        ComputeTotal()
+    End Sub
+
+    Private Sub NumQuantity_ValueChanged(sender As Object, e As EventArgs) Handles numQuantity.ValueChanged
+        ComputeTotal()
+    End Sub
+    Private Sub btnAddToCart_Click(sender As Object, e As EventArgs) Handles btnAddToCart.Click
+
+        If Not grpCart.Visible Then
+            ShowNotification("Please click CREATE CART first", "warning")
+            Return
+        End If
+
+        If cmbServiceType.Text = "" Or cmbServiceType.Text = "Type of Service" Then
+            ShowNotification("Please select a valid service type", "warning")
+            cmbServiceType.Focus()
+            Return
+        End If
+
+        If cmbSize.Text = "" Or cmbSize.Text = "Select Size" Then
+            ShowNotification("Please select a size", "warning")
+            cmbSize.Focus()
+            Return
+        End If
+
+        If numQuantity.Value <= 0 Then
+            ShowNotification("Quantity must be greater than 0", "warning")
+            numQuantity.Focus()
+            Return
+        End If
+
+        Dim price As Decimal = Val(txtPrice.Text)
+        If price <= 0 Then
+            ShowNotification("Price not available for this service/size", "warning")
+            Return
+        End If
+
+        ' ADD TO CART - 5 values lang (WALA NG TIME)
+        Dim total As Decimal = numQuantity.Value * price
+
+        ' TAMA: 5 values para sa 5 columns
+        cartItems.Rows.Add(cmbServiceType.Text, cmbSize.Text, numQuantity.Value, price, total)
+        UpdateCartTotal()
+
+        ' CLEAR FIELDS
+        cmbServiceType.SelectedIndex = -1
+        cmbSize.Items.Clear()
+        cmbSize.Text = "Select Size"
+        numQuantity.Value = 1
+        txtPrice.Clear()
+
+        cmbServiceType.Focus()
+
+        ShowNotification("Item added to cart!", "success")
+    End Sub
+    Private Sub UpdateCartTotal()
+        cartTotal = 0
+        For Each row As DataRow In cartItems.Rows
+            cartTotal += Convert.ToDecimal(row("Total"))
+        Next
+        lblCartTotal.Text = "₱ " & cartTotal.ToString("N2")
+        CalculateChange()
+
+        ' I-enable ang Done button kung may laman ang cart
+        btnDone.Enabled = (cartItems.Rows.Count > 0)
+    End Sub
+    Private Sub CalculateChange()
+        Dim amountPaid As Decimal = 0
+        If Decimal.TryParse(txtReceiveMoney.Text, amountPaid) Then
+            Dim change As Decimal = amountPaid - cartTotal
+            If change >= 0 Then
+                lblChange.Text = "₱ " & change.ToString("N2")
+                lblChange.ForeColor = Color.Green
+            Else
+                lblChange.Text = "₱ " & change.ToString("N2") & " (kulang)"
+                lblChange.ForeColor = Color.Red
+            End If
+        Else
+            lblChange.Text = "₱ 0.00"
+        End If
+    End Sub
+    Private Sub txtReceiveMoney_TextChanged(sender As Object, e As EventArgs) Handles txtReceiveMoney.TextChanged
+        CalculateChange()
+    End Sub
+    Private Sub btnCancel_Click(sender As Object, e As EventArgs) Handles btnCancel.Click
+
+        Dim itemCount As Integer = cartItems.Rows.Count
+
+        If itemCount > 0 Then
+            If MessageBox.Show($"Cancel transaction? ({itemCount} item(s) will be cleared).",
+                           "Cancel Transaction", MessageBoxButtons.YesNo, MessageBoxIcon.Question) = DialogResult.Yes Then
+
+                cartItems.Clear()
+                UpdateCartTotal()
+                txtReceiveMoney.Clear()
+                lblChange.Text = "₱ 0.00"
+                grpCart.Visible = False
+                Timer1.Enabled = False  ' Stop ang timer
+                lblRunningTime.Visible = False
+
+                ShowNotification("Transaction cancelled", "success")
+            End If
+        Else
+            If MessageBox.Show("Are you sure you want to close the cart?", "Close Cart", MessageBoxButtons.YesNo, MessageBoxIcon.Question) = DialogResult.Yes Then
+                grpCart.Visible = False
+                Timer1.Enabled = False  ' Stop ang timer
+                lblRunningTime.Visible = False
+            End If
+        End If
+    End Sub
+    Private Sub btnClearCart_Click(sender As Object, e As EventArgs) Handles btnClearCart.Click
+
+        If cartItems.Rows.Count = 0 Then
+            ShowNotification("Cart is already empty", "warning")
+            Return
+        End If
+
+        If MessageBox.Show($"Clear all {cartItems.Rows.Count} item(s) from cart?",
+                           "Confirm Clear", MessageBoxButtons.YesNo, MessageBoxIcon.Question) = DialogResult.Yes Then
+
+            cartItems.Clear()
+            UpdateCartTotal()
+            txtReceiveMoney.Clear()
+            lblChange.Text = "₱ 0.00"
+
+            ShowNotification("Cart cleared", "success")
+        End If
+    End Sub
+    Private Sub btnRemoveFromCart_Click(sender As Object, e As EventArgs) Handles btnRemoveFromCart.Click
+
+        If dgvCart.CurrentRow IsNot Nothing Then
+            Dim serviceType As String = dgvCart.CurrentRow.Cells("ServiceType").Value.ToString()
+            Dim size As String = dgvCart.CurrentRow.Cells("Size").Value.ToString()
+
+            If MessageBox.Show($"Remove {serviceType} ({size}) from cart?", "Confirm Remove",
+                               MessageBoxButtons.YesNo, MessageBoxIcon.Question) = DialogResult.Yes Then
+
+                Dim rowIndex As Integer = dgvCart.CurrentRow.Index
+                cartItems.Rows.RemoveAt(rowIndex)
+                UpdateCartTotal()
+
+                If cartItems.Rows.Count = 0 Then
+                    grpCart.Visible = False
+                    Timer1.Enabled = False  ' Stop ang timer
+                    txtReceiveMoney.Clear()
+                    lblChange.Text = "₱ 0.00"
+                End If
+
+                ShowNotification("Item removed from cart", "success")
+            End If
+        Else
+            ShowNotification("Please select an item to remove", "warning")
+        End If
+    End Sub
+
+    Private Sub PrintReceipt()
+        Try
+            'PrintReceiptDocument.Print()
+        Catch ex As Exception
+            MessageBox.Show("Print error: " & ex.Message, "Warning")
+        End Try
+    End Sub
+
+    Private Sub PrintReceiptDocument_PrintPage(sender As Object, e As PrintPageEventArgs) Handles PrintReceiptDocument.PrintPage
+        Dim font As New Font("Courier New", 10)
+        Dim boldFont As New Font("Courier New", 12, FontStyle.Bold)
+        Dim y As Integer = 50
+        Dim x As Integer = 50
+
+        e.Graphics.DrawString("PRINTING SHOP", boldFont, Brushes.Black, x, y)
+        y += 25
+        e.Graphics.DrawString("SALES RECEIPT", font, Brushes.Black, x, y)
+        y += 25
+        e.Graphics.DrawString("Date: " & DateTime.Now.ToString("yyyy-MM-dd"), font, Brushes.Black, x, y)
+        y += 20
+        e.Graphics.DrawString("Time: " & lblRunningTime.Text(), font, Brushes.Black, x, y)
+        y += 25
+        e.Graphics.DrawString("Order ID: " & currentOrderID.ToString(), font, Brushes.Black, x, y)
+        y += 25
+
+        e.Graphics.DrawString(New String("-", 40), font, Brushes.Black, x, y)
+        y += 20
+
+        For Each row As DataRow In cartItems.Rows
+            Dim itemText As String = row("ServiceType").ToString() & " (" & row("Size").ToString() & ")"
+            e.Graphics.DrawString(itemText, font, Brushes.Black, x, y)
+            y += 18
+
+            Dim qtyText As String = "  x" & row("Quantity").ToString() & " @ ₱" & Convert.ToDecimal(row("Price")).ToString("N2")
+            e.Graphics.DrawString(qtyText, font, Brushes.Black, x + 10, y)
+
+            Dim totalText As String = "₱" & Convert.ToDecimal(row("Total")).ToString("N2")
+            e.Graphics.DrawString(totalText, font, Brushes.Black, x + 200, y)
+            y += 20
+        Next
+
+        e.Graphics.DrawString(New String("-", 40), font, Brushes.Black, x, y)
+        y += 20
+
+        e.Graphics.DrawString("TOTAL:", boldFont, Brushes.Black, x, y)
+        e.Graphics.DrawString("₱" & cartTotal.ToString("N2"), boldFont, Brushes.Black, x + 200, y)
+        y += 20
+
+        e.Graphics.DrawString("RECEIVED:", font, Brushes.Black, x, y)
+        e.Graphics.DrawString("₱" & txtReceiveMoney.Text, font, Brushes.Black, x + 200, y)
+        y += 20
+
+        e.Graphics.DrawString("CHANGE:", font, Brushes.Black, x, y)
+        e.Graphics.DrawString(lblChange.Text, font, Brushes.Black, x + 200, y)
+        y += 25
+
+        e.Graphics.DrawString(New String("-", 40), font, Brushes.Black, x, y)
+        y += 20
+        e.Graphics.DrawString("Thank you!", boldFont, Brushes.Black, x, y)
+    End Sub
+
+    ' =========================
+    ' Save Prices
+    ' =========================
+    Private Sub BtnSavePrices_Click(sender As Object, e As EventArgs) Handles btnSavePrices.Click
+        Try
+            con.Open()
+            For Each row As DataGridViewRow In dgvPrices.Rows
+                If Not row.IsNewRow Then
+                    Dim cmd As New MySqlCommand("UPDATE Prices SET Price=@Price WHERE ID=@ID", con)
+                    cmd.Parameters.AddWithValue("@Price", row.Cells("Price").Value)
+                    cmd.Parameters.AddWithValue("@ID", row.Cells("ID").Value)
+                    cmd.ExecuteNonQuery()
+                End If
+            Next
+            con.Close()
+            MessageBox.Show("Prices Updated Successfully!")
+        Catch ex As Exception
+            MessageBox.Show(ex.Message)
+            con.Close()
+        End Try
+    End Sub
+
+    ' =========================
+    ' Filter Function (Daily/Weekly/Monthly)
+    ' =========================
+    Private Sub FilterSales(Optional dayName As String = "", Optional monthNumber As Integer = 0, Optional startDate As Date? = Nothing, Optional endDate As Date? = Nothing)
+        Try
+            Dim sql As String = "SELECT * FROM Sales WHERE 1=1"
+            Dim cmd As New MySqlCommand()
+            cmd.Connection = con
+
+            ' Daily filter by day name
+            If dayName <> "" Then
+                sql &= " AND DAYNAME(SaleDate) = @Day"
+                cmd.Parameters.AddWithValue("@Day", dayName)
+            End If
+
+            ' Monthly filter
+            If monthNumber > 0 Then
+                sql &= " AND MONTH(SaleDate) = @Month"
+                cmd.Parameters.AddWithValue("@Month", monthNumber)
+            End If
+
+            ' Weekly filter by exact date range
+            If startDate.HasValue AndAlso endDate.HasValue Then
+                sql &= " AND SaleDate BETWEEN @StartDate AND @EndDate"
+                cmd.Parameters.AddWithValue("@StartDate", startDate.Value.ToString("yyyy-MM-dd"))
+                cmd.Parameters.AddWithValue("@EndDate", endDate.Value.ToString("yyyy-MM-dd"))
+            End If
+
+            cmd.CommandText = sql
+
+            Dim da As New MySqlDataAdapter(cmd)
+            Dim dt As New DataTable()
+            da.Fill(dt)
+
+            dgvSales.DataSource = Nothing
+            dgvSales.Rows.Clear()
+            dgvSales.DataSource = dt
+            ComputeReportTotal(dt)
+        Catch ex As Exception
+            MessageBox.Show(ex.Message)
+        End Try
+    End Sub
+
+    ' =========================
+    ' ComboBox Events
+    ' =========================
+
+
+
+
+
+
+    Private Sub Panel2_Paint(sender As Object, e As PaintEventArgs) Handles Panel2.Paint
+
+    End Sub
+    Private Sub btnPrint_Click(sender As Object, e As EventArgs) Handles btnPrint.Click
+        ' Landscape para mas maraming columns magkasya
+        PrintDocument1.DefaultPageSettings.Landscape = True
+        PrintPreviewDialog1.Document = PrintDocument1
+        PrintPreviewDialog1.ShowDialog()
+    End Sub
+    Private Sub PrintDocument1_PrintPage(sender As Object, e As PrintPageEventArgs) Handles PrintDocument1.PrintPage
+
+        Static currentRowIndex As Integer = 0
+
+        Dim printFont As New Font("Consolas", 8, FontStyle.Regular)
+        Dim headerFont As New Font("Consolas", 8, FontStyle.Bold)
+        Dim titleFont As New Font("Consolas", 10, FontStyle.Bold)
+
+        Dim startX As Integer = 20
+        Dim startY As Integer = 40
+        Dim lineHeight As Integer = 14
+        Dim currentY As Integer = startY
+
+        ' ===== HEADER =====
+        If currentRowIndex = 0 Then
+            e.Graphics.DrawString("PRINTING SHOP", titleFont, Brushes.Black, startX, currentY)
+            currentY += 18
+            e.Graphics.DrawString("SALES REPORT", headerFont, Brushes.Black, startX, currentY)
+            currentY += 18
+            e.Graphics.DrawString($"Period: {dtpFromDate.Value:yyyy-MM-dd} to {dtpToDate.Value:yyyy-MM-dd}", printFont, Brushes.Black, startX, currentY)
+            currentY += 14
+
+            ' Compute grand total
+            Dim grandTotal As Decimal = 0
+            For Each row As DataGridViewRow In dgvSales.Rows
+                If Not row.IsNewRow AndAlso row.Cells("TotalAmount").Value IsNot Nothing Then
+                    grandTotal += Convert.ToDecimal(row.Cells("TotalAmount").Value)
+                End If
+            Next
+
+            e.Graphics.DrawString($"Total Sales: ₱{grandTotal:N2}", headerFont, Brushes.Black, startX, currentY)
+            currentY += 20
+
+            ' Column Headers - gaya ng sa DataGridView mo
+            Dim headers As String = "ID    Service              Size     Qty   Price   Total     Date       Time     Paid      Change    Order"
+            e.Graphics.DrawString(headers, headerFont, Brushes.Black, startX, currentY)
+            currentY += 12
+            e.Graphics.DrawString(New String("-", 105), printFont, Brushes.Black, startX, currentY)
+            currentY += 12
+        Else
+            currentY = startY
+        End If
+
+        ' ===== PRINT ROWS =====
+        For i As Integer = currentRowIndex To dgvSales.Rows.Count - 1
+            Dim row As DataGridViewRow = dgvSales.Rows(i)
+            If Not row.IsNewRow Then
+                ' Kunin ang values
+                Dim id As String = If(row.Cells("ID").Value IsNot Nothing, row.Cells("ID").Value.ToString(), "")
+                Dim service As String = If(row.Cells("ServiceType").Value IsNot Nothing, row.Cells("ServiceType").Value.ToString(), "")
+                If service.Length > 18 Then service = service.Substring(0, 15) & "..."
+
+                Dim size As String = If(row.Cells("Size").Value IsNot Nothing, row.Cells("Size").Value.ToString(), "")
+                If size.Length > 8 Then size = size.Substring(0, 5) & "..."
+
+                Dim qty As String = If(row.Cells("Quantity").Value IsNot Nothing, row.Cells("Quantity").Value.ToString(), "0")
+                Dim price As String = FormatCurrency(row.Cells("Price").Value)
+                Dim total As String = FormatCurrency(row.Cells("TotalAmount").Value)
+                Dim dateVal As String = FormatDateShort(row.Cells("SaleDate").Value)
+                Dim timeVal As String = FormatTimeShort(row.Cells("SaleTime").Value)
+                Dim paid As String = FormatCurrency(row.Cells("AmountPaid").Value)
+                Dim change As String = FormatCurrency(row.Cells("ChangeAmount").Value)
+                Dim orderID As String = If(row.Cells("OrderID").Value IsNot Nothing, row.Cells("OrderID").Value.ToString(), "")
+
+                ' I-format ang bawat column na may fixed spacing
+                Dim line As String = String.Format("{0,-5} {1,-20} {2,-8} {3,-5} {4,-7} {5,-9} {6,-10} {7,-7} {8,-9} {9,-8} {10,-8}",
+                                                    id, service, size, qty, price, total, dateVal, timeVal, paid, change, orderID)
+
+                e.Graphics.DrawString(line, printFont, Brushes.Black, startX, currentY)
+                currentY += lineHeight
+
+                ' Page break
+                If currentY > e.PageBounds.Height - 60 Then
+                    currentRowIndex = i + 1
+                    e.HasMorePages = True
+                    Return
+                End If
+            End If
+        Next
+
+        ' ===== FOOTER =====
+        currentY += 10
+        e.Graphics.DrawString(New String("-", 105), printFont, Brushes.Black, startX, currentY)
+        currentY += 15
+
+        ' Grand Total
+        Dim finalGrandTotal As Decimal = 0
+        For Each row As DataGridViewRow In dgvSales.Rows
+            If Not row.IsNewRow AndAlso row.Cells("TotalAmount").Value IsNot Nothing Then
+                finalGrandTotal += Convert.ToDecimal(row.Cells("TotalAmount").Value)
+            End If
+        Next
+
+        Dim totalText As String = String.Format("{0,85} {1,12}", "GRAND TOTAL:", $"₱{finalGrandTotal:N2}")
+        e.Graphics.DrawString(totalText, headerFont, Brushes.Black, startX, currentY)
+        currentY += 15
+
+        e.Graphics.DrawString($"Total Transactions: {dgvSales.Rows.Count}", printFont, Brushes.Black, startX, currentY)
+        currentY += 15
+
+        e.Graphics.DrawString($"Printed: {DateTime.Now:yyyy-MM-dd HH:mm:ss}", printFont, Brushes.Black, startX, currentY)
+
+        ' Reset
+        currentRowIndex = 0
+        e.HasMorePages = False
+    End Sub
+    Private Function FormatCurrency(value As Object) As String
+        If value Is Nothing OrElse IsDBNull(value) Then Return "0.00"
+        Dim num As Decimal
+        If Decimal.TryParse(value.ToString(), num) Then
+            Return num.ToString("0.00")
+        End If
+        Return "0.00"
+    End Function
+
+    Private Function FormatDateShort(value As Object) As String
+        If value Is Nothing OrElse IsDBNull(value) Then Return ""
+        Dim dt As DateTime
+        If DateTime.TryParse(value.ToString(), dt) Then
+            Return dt.ToString("MM/dd/yy")
+        End If
+        Return value.ToString()
+    End Function
+
+    Private Function FormatTimeShort(value As Object) As String
+        If value Is Nothing OrElse IsDBNull(value) Then Return ""
+        Dim timeStr As String = value.ToString()
+        If timeStr.Length >= 5 Then
+            Return timeStr.Substring(0, 5)
+        End If
+        Return timeStr
+    End Function
+
+    Private Sub Button1_Click(sender As Object, e As EventArgs)
+
+    End Sub
+
+    Private Sub dgvPrices_CellContentClick(sender As Object, e As DataGridViewCellEventArgs) Handles dgvPrices.CellContentClick
+
+    End Sub
+
+    Private Sub Form1_FormClosed(sender As Object, e As FormClosedEventArgs) Handles MyBase.FormClosed
+
+    End Sub
+    ' This event fires when the user clicks the "X" button or Alt+F4
+    Private Sub Form1_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
+
+        ' 1. Create a message box with Yes and No buttons
+        Dim result As DialogResult = MessageBox.Show("Are you sure you want to exit? Any unsaved changes will be lost.",
+                                                     "Confirm Exit",
+                                                     MessageBoxButtons.YesNo,
+                                                     MessageBoxIcon.Question)
+
+        ' 2. If the user clicks "No", cancel the close event
+        If result = DialogResult.No Then
+            e.Cancel = True ' This stops the form from closing
+        End If
+
+    End Sub
+    ' =========================
+    ' LOAD WEEK SALES (Current Week)
+    ' =========================
+    Private Sub LoadWeekSales()
+        Try
+            ' Kunin ang start ng linggo (Monday)
+            Dim today As DateTime = DateTime.Now.Date
+            Dim diff As Integer = today.DayOfWeek - DayOfWeek.Monday
+            If diff < 0 Then diff += 7
+            Dim startOfWeek As DateTime = today.AddDays(-diff)
+
+            ' Kunin ang end ng linggo (Sunday)
+            Dim endOfWeek As DateTime = startOfWeek.AddDays(6)
+
+            ' I-set ang date pickers
+            dtpFromDate.Value = startOfWeek
+            dtpToDate.Value = endOfWeek
+
+            ' Load report
+            LoadSalesReportByDateRange(startOfWeek, endOfWeek)
+
+            ShowNotification($"Week Sales: {startOfWeek:yyyy-MM-dd} to {endOfWeek:yyyy-MM-dd}", "success")
+
+        Catch ex As Exception
+            MessageBox.Show("Error loading week sales: " & ex.Message)
+        End Try
+    End Sub
+    ' =========================
+    ' LOAD YEAR SALES (Current Year)
+    ' =========================
+    Private Sub LoadYearSales()
+        Try
+            ' Kunin ang start ng taon (January 1)
+            Dim startOfYear As DateTime = New DateTime(DateTime.Now.Year, 1, 1)
+
+            ' Kunin ang end ng taon (December 31)
+            Dim endOfYear As DateTime = New DateTime(DateTime.Now.Year, 12, 31)
+
+            ' I-set ang date pickers
+            dtpFromDate.Value = startOfYear
+            dtpToDate.Value = endOfYear
+
+            ' Load report
+            LoadSalesReportByDateRange(startOfYear, endOfYear)
+
+            ShowNotification($"Year Sales: {DateTime.Now.Year} (January to December)", "success")
+
+        Catch ex As Exception
+            MessageBox.Show("Error loading year sales: " & ex.Message)
+        End Try
+    End Sub
+    Private Sub btnWeekSales_Click(sender As Object, e As EventArgs) Handles btnWeekSales.Click
+        LoadWeekSales()
+    End Sub
+
+    Private Sub btnYearSales_Click(sender As Object, e As EventArgs) Handles btnYearSales.Click
+        LoadYearSales()
+    End Sub
+
+    Private Sub Label13_Click(sender As Object, e As EventArgs) Handles Label13.Click
+
+    End Sub
+
+    Private Sub dtpSaleTime_ValueChanged(sender As Object, e As EventArgs)
+
+    End Sub
+
+    Private Sub grpCart_Enter(sender As Object, e As EventArgs) Handles grpCart.Enter
+
+    End Sub
+
+    Private Sub btnDone_Click(sender As Object, e As EventArgs) Handles btnDone.Click
+
+        If cartItems.Rows.Count = 0 Then
+            ShowNotification("Cart is empty. Please add items first.", "warning")
+            Return
+        End If
+
+        ' Check kung may laman ang txtReceiveMoney
+        If txtReceiveMoney.Text = "" Or txtReceiveMoney.Text = "Enter amount received" Then
+            ShowNotification("Please enter valid amount received", "warning")
+            txtReceiveMoney.Focus()
+            Return
+        End If
+
+        Dim amountPaid As Decimal = 0
+        If Not Decimal.TryParse(txtReceiveMoney.Text, amountPaid) Or amountPaid <= 0 Then
+            ShowNotification("Please enter valid amount received (numbers only)", "warning")
+            txtReceiveMoney.Focus()
+            Return
+        End If
+
+        If amountPaid < cartTotal Then
+            ShowNotification($"Insufficient payment. Short by ₱{(cartTotal - amountPaid):N2}", "warning")
+            txtReceiveMoney.Focus()
+            Return
+        End If
+
+        Dim change As Decimal = amountPaid - cartTotal
+
+        ' Automatic time - gamit ang system oras
+        Dim saleTime As String = DateTime.Now.ToString("HH:mm:ss")
+        Dim saleDate As String = DateTime.Now.ToString("yyyy-MM-dd")
+
+        ' ===== GENERATE ORDER ID MUNA BAGO I-CONFIRM =====
+        Using conTemp As New MySqlConnection(connString)
+            conTemp.Open()
+            Dim maxOrderID As Object = Nothing
+            Using cmd As New MySqlCommand("SELECT MAX(OrderID) FROM sales", conTemp)
+                maxOrderID = cmd.ExecuteScalar()
+            End Using
+
+            If maxOrderID Is DBNull.Value OrElse maxOrderID Is Nothing Then
+                currentOrderID = 100001
+            Else
+                currentOrderID = Convert.ToInt32(maxOrderID) + 1
+            End If
+            conTemp.Close()
+        End Using
+        ' ===== END OF ORDER ID GENERATION =====
+
+        ' ===== CONFIRM TRANSACTION =====
+        Dim msg As String = ""
+        msg &= "═══════════════════════════════════" & Environment.NewLine
+        msg &= "      TRANSACTION SUMMARY" & Environment.NewLine
+        msg &= "═══════════════════════════════════" & Environment.NewLine & Environment.NewLine
+
+        For Each row As DataRow In cartItems.Rows
+            Dim productName As String = row("ServiceType").ToString() & " (" & row("Size").ToString() & ")"
+            Dim qty As Integer = Convert.ToInt32(row("Quantity"))
+            Dim price As Decimal = Convert.ToDecimal(row("Price"))
+            Dim total As Decimal = Convert.ToDecimal(row("Total"))
+
+            msg &= $"{productName}" & Environment.NewLine
+            msg &= String.Format("   x{0} @ ₱{1:N2}{2,30}₱{3:N2}", qty, price, "", total) & Environment.NewLine
+        Next
+
+        msg &= Environment.NewLine & "───────────────────────────────────" & Environment.NewLine
+        msg &= String.Format("{0,-15} {1,33}", "TOTAL:", $"₱{cartTotal:N2}") & Environment.NewLine
+        msg &= String.Format("{0,-15} {1,30}", "RECEIVED:", $"₱{amountPaid:N2}") & Environment.NewLine
+        msg &= String.Format("{0,-15} {1,30}", "CHANGE:", $"₱{change:N2}") & Environment.NewLine & Environment.NewLine
+        msg &= String.Format("{0,-15} {1,31}", "Date:", $"{DateTime.Now.ToString("yyyy-MM-dd")}") & Environment.NewLine
+        msg &= String.Format("{0,-15} {1,31}", "Time:", $"{DateTime.Now.ToString("hh:mm:ss tt")}") & Environment.NewLine
+        msg &= String.Format("{0,-15} {1,30}", "Order ID:", $"{currentOrderID}") & Environment.NewLine & Environment.NewLine
+        msg &= New String(" ", 15) & "Save this transaction?"
+
+        If MessageBox.Show(msg, "Confirm Transaction", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) = DialogResult.No Then
+            Return
+        End If
+
+        ' ===== I-SAVE SA DATABASE (YES ANG PININDOT) =====
+        Try
+            Using con As New MySqlConnection(connString)
+                con.Open()
+
+                For Each row As DataRow In cartItems.Rows
+                    Dim cmd As New MySqlCommand("INSERT INTO Sales (ServiceType, Size, Quantity, Price, TotalAmount, SaleDate, SaleTime, AmountPaid, ChangeAmount, OrderID) VALUES (@ServiceType, @Size, @Quantity, @Price, @TotalAmount, @SaleDate, @SaleTime, @AmountPaid, @Change, @OrderID)", con)
+
+                    cmd.Parameters.AddWithValue("@ServiceType", row("ServiceType").ToString())
+                    cmd.Parameters.AddWithValue("@Size", row("Size").ToString())
+                    cmd.Parameters.AddWithValue("@Quantity", Convert.ToInt32(row("Quantity")))
+                    cmd.Parameters.AddWithValue("@Price", Convert.ToDecimal(row("Price")))
+                    cmd.Parameters.AddWithValue("@TotalAmount", Convert.ToDecimal(row("Total")))
+                    cmd.Parameters.AddWithValue("@SaleDate", saleDate)
+                    cmd.Parameters.AddWithValue("@SaleTime", saleTime)
+                    cmd.Parameters.AddWithValue("@AmountPaid", amountPaid)
+                    cmd.Parameters.AddWithValue("@Change", change)
+                    cmd.Parameters.AddWithValue("@OrderID", currentOrderID)
+
+                    cmd.ExecuteNonQuery()
+                Next
+            End Using
+
+            ' I-update ang Order ID label
+            lblOrderId.Text = currentOrderID.ToString()
+
+            ShowNotification($"✅ Transaction saved! Order ID: {currentOrderID}", "success")
+
+            ' Clear cart
+            cartItems.Clear()
+            UpdateCartTotal()
+            txtReceiveMoney.Text = "Enter amount received"
+            txtReceiveMoney.ForeColor = Color.Gray
+            lblChange.Text = "₱ 0.00"
+            grpCart.Visible = False
+            Timer1.Enabled = False
+            lblRunningTime.Visible = False
+
+            ' Refresh sales report
+            LoadData()
+            LoadSalesReportByDateRange(dtpFromDate.Value, dtpToDate.Value)
+
+        Catch ex As Exception
+            ShowNotification("Error: " & ex.Message, "error")
+        End Try
+    End Sub
+    Private Sub dgvCart_CellContentClick(sender As Object, e As DataGridViewCellEventArgs) Handles dgvCart.CellContentClick
+
+    End Sub
+
+    Private Sub lblRunningTime_Click(sender As Object, e As EventArgs) Handles lblRunningTime.Click
+
+    End Sub
+End Class
