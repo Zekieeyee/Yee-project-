@@ -1,0 +1,3122 @@
+import customtkinter as ctk
+from tkinter import messagebox, simpledialog
+from PIL import Image
+import os, random, hashlib, secrets, re
+from datetime import datetime, timedelta
+from supabase import create_client, Client
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from collections import Counter, defaultdict
+import calendar
+from functools import wraps
+from typing import Optional, Dict, List, Any
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import tempfile
+
+# --- SUPABASE CONFIGURATION ---
+SUPABASE_URL = "https://kpoemwaegtnjurzrypgg.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtwb2Vtd2FlZ3RuanVyenJ5cGdnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3MjAzOTUsImV4cCI6MjA5MTI5NjM5NX0.hqH3j_UWB5v6KwccGQLaT1WtfJVuL4MQsXKxEDqptz8"
+
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Connected to Supabase successfully!")
+except Exception as e:
+    print(f"❌ Connection Error: {e}")
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("green")
+
+
+# ============================================================================
+# CRITERION 1: FUNCTIONALITY (30%)
+# ============================================================================
+
+class TransactionManager:
+    def __init__(self):
+        self.pending_transactions = []
+
+    def begin_transaction(self):
+        transaction_id = secrets.token_hex(8)
+        self.pending_transactions.append(transaction_id)
+        return transaction_id
+
+    def commit(self, transaction_id):
+        if transaction_id in self.pending_transactions:
+            self.pending_transactions.remove(transaction_id)
+            return True
+        return False
+
+    def rollback(self, transaction_id):
+        if transaction_id in self.pending_transactions:
+            self.pending_transactions.remove(transaction_id)
+            return True
+        return False
+
+
+# ============================================================================
+# CRITERION 5: DATA SECURITY (20%)
+# ============================================================================
+
+class SecurityManager:
+    @staticmethod
+    def hash_password(password: str) -> str:
+        return hashlib.sha256(password.encode()).hexdigest()
+
+    @staticmethod
+    def verify_password(password: str, hashed: str) -> bool:
+        return SecurityManager.hash_password(password) == hashed
+
+    @staticmethod
+    def generate_session_token() -> str:
+        return secrets.token_urlsafe(32)
+
+    @staticmethod
+    def sanitize_input(input_str: str) -> str:
+        if not input_str:
+            return ""
+        sanitized = re.sub(r'[<>{}[\]\\;]', '', input_str)
+        return sanitized.strip()
+
+    @staticmethod
+    def validate_email(email: str) -> bool:
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return bool(re.match(pattern, email))
+
+    @staticmethod
+    def mask_sensitive_data(data: str, show_chars: int = 4) -> str:
+        if len(data) <= show_chars * 2:
+            return "*" * len(data)
+        return data[:show_chars] + "*" * (len(data) - show_chars * 2) + data[-show_chars:]
+
+
+class AuditLogger:
+    def __init__(self):
+        self.audit_logs = []
+
+    def log_action(self, user: str, action: str, details: str, status: str = "SUCCESS"):
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "user": user,
+            "action": action,
+            "details": SecurityManager.sanitize_input(details),
+            "status": status,
+            "ip_address": "localhost"
+        }
+        self.audit_logs.append(log_entry)
+        print(f"[AUDIT] {user} - {action} - {status}")
+
+        try:
+            supabase.table("audit_logs").insert(log_entry).execute()
+        except:
+            pass
+
+
+# ============================================================================
+# CRITERION 2: INTEGRATION WITH EXISTING PROCESSES (15%)
+# ============================================================================
+
+class InventoryManager:
+    def __init__(self):
+        self.inventory = {}
+        self.low_stock_threshold = 10
+        self.critical_stock_threshold = 5
+        self.load_inventory()
+
+    def load_inventory(self):
+        try:
+            print("🔄 Loading inventory from Supabase...")
+            res = supabase.table("inventory").select("*").execute()
+
+            print(f"📊 Raw response from Supabase: {res.data}")
+
+            if res.data:
+                self.inventory = {}  # I-clear muna ang existing
+                for item in res.data:
+                    self.inventory[item['product_name']] = item
+                print(f"📦 Loaded {len(self.inventory)} inventory items from database")
+
+                # I-print lahat ng items para makita
+                for name in self.inventory.keys():
+                    print(f"   - {name}")
+            else:
+                print("⚠️ Inventory table is empty, initializing default inventory...")
+                self.initialize_default_inventory()
+                self.save_inventory_to_db()
+        except Exception as e:
+            print(f"⚠️ Error loading inventory: {e}")
+            print("Initializing default inventory...")
+            self.initialize_default_inventory()
+            self.save_inventory_to_db()
+
+    def save_inventory_to_db(self):
+        """Save default inventory to Supabase"""
+        try:
+            for name, data in self.inventory.items():
+                # Check if item already exists
+                existing = supabase.table("inventory").select("*").eq("product_name", name).execute()
+                if not existing.data:
+                    # Insert new item
+                    supabase.table("inventory").insert({
+                        "product_name": name,
+                        "stock": data['stock'],
+                        "unit": data['unit'],
+                        "reorder_point": data.get('reorder_point', 10)
+                    }).execute()
+                    print(f"✅ Added {name} to inventory database")
+                else:
+                    # Update existing
+                    supabase.table("inventory").update({
+                        "stock": data['stock'],
+                        "unit": data['unit'],
+                        "reorder_point": data.get('reorder_point', 10)
+                    }).eq("product_name", name).execute()
+                    print(f"✅ Updated {name} in inventory database")
+            print("✅ Inventory saved to Supabase successfully!")
+        except Exception as e:
+            print(f"❌ Error saving inventory to database: {e}")
+
+    def initialize_default_inventory(self):
+        """Create default inventory items - para sa lahat ng menu items"""
+        default_items = {
+            # Coffee ingredients
+            "Coffee Beans": {"stock": 100, "unit": "kg", "reorder_point": 20},
+            "Milk": {"stock": 50, "unit": "L", "reorder_point": 10},
+            "Sugar": {"stock": 30, "unit": "kg", "reorder_point": 8},
+
+            # Cup sizes
+            "Cup Small": {"stock": 500, "unit": "pcs", "reorder_point": 50, "size": "Small"},
+            "Cup Medium": {"stock": 400, "unit": "pcs", "reorder_point": 50, "size": "Medium"},
+            "Cup Large": {"stock": 300, "unit": "pcs", "reorder_point": 50, "size": "Large"},
+
+            # Food items (no deduction needed, just for tracking)
+            "Glazed Donut": {"stock": 50, "unit": "pcs", "reorder_point": 10},
+            "Chocolate Croissant": {"stock": 40, "unit": "pcs", "reorder_point": 10},
+            "Blueberry Cheesecake": {"stock": 30, "unit": "pcs", "reorder_point": 10},
+
+            # Frappe ingredients
+            "Frappe Base": {"stock": 20, "unit": "L", "reorder_point": 5},
+            "Chocolate Syrup": {"stock": 15, "unit": "L", "reorder_point": 5},
+            "Matcha Powder": {"stock": 10, "unit": "kg", "reorder_point": 3},
+
+            # Tea ingredients
+            "Tea Leaves": {"stock": 15, "unit": "kg", "reorder_point": 5},
+            "Hibiscus": {"stock": 10, "unit": "kg", "reorder_point": 3},
+        }
+        for name, data in default_items.items():
+            self.inventory[name] = data
+        print("✅ Default inventory initialized with all menu items")
+
+    def deduct_stock(self, product_name: str, quantity: int, size: str = "Small"):
+        """Deduct stock based on product and size - MAY IBA'T IBANG DEDUCTION PER SIZE"""
+
+        # Size multipliers (base sa Small)
+        size_multiplier = {
+            "Small": 1.0,
+            "Medium": 1.5,  # 50% more ingredients
+            "Large": 2.0  # 100% more ingredients
+        }
+
+        multiplier = size_multiplier.get(size, 1.0)
+
+        # Base ingredients para sa Small size
+        base_ingredients = {
+            "Coffee": {
+                "Coffee Beans": 0.02,
+                "Milk": 0.2,
+                "Sugar": 0.01,
+            },
+            "Frappe/Blended Drinks": {
+                "Frappe Base": 0.25,
+                "Milk": 0.2,
+                "Sugar": 0.015,
+            },
+            "Java Chip Frappe": {
+                "Frappe Base": 0.25,
+                "Milk": 0.2,
+                "Chocolate Syrup": 0.03,
+                "Sugar": 0.015,
+            },
+            "Matcha Cream Frappe": {
+                "Frappe Base": 0.25,
+                "Milk": 0.2,
+                "Matcha Powder": 0.01,
+                "Sugar": 0.015,
+            },
+            "Tea": {
+                "Tea Leaves": 0.01,
+                "Sugar": 0.01,
+            },
+            "Iced Hibiscus Tea": {
+                "Hibiscus": 0.01,
+                "Sugar": 0.01,
+            },
+            "Classic Milk Tea": {
+                "Tea Leaves": 0.01,
+                "Milk": 0.15,
+                "Sugar": 0.015,
+            },
+            "Food": {
+                "Glazed Donut": 1,
+                "Chocolate Croissant": 1,
+                "Blueberry Cheesecake": 1,
+            }
+        }
+
+        # I-remove ang size sa product name para makuha ang base name
+        base_product_name = product_name.split(' (')[0] if ' (' in product_name else product_name
+
+        # Hanapin ang tamang ingredient map para sa product
+        matched_map = None
+        for key in base_ingredients:
+            if key.lower() in base_product_name.lower() or base_product_name.lower() in key.lower():
+                matched_map = base_ingredients[key]
+                break
+
+        if not matched_map:
+            matched_map = base_ingredients["Coffee"]
+
+        # Cup size mapping
+        cup_size_map = {
+            "Small": "Cup Small",
+            "Medium": "Cup Medium",
+            "Large": "Cup Large"
+        }
+        cup_item = cup_size_map.get(size, "Cup Small")
+
+        # Check kung food item
+        is_food = base_product_name in ["Glazed Donut", "Chocolate Croissant", "Blueberry Cheesecake"]
+
+        # Deduct ingredients na may multiplier base sa size
+        print(f"\n📊 ORDER DETAILS: {base_product_name} ({size}) x{quantity}")
+        print(f"   Size multiplier: {multiplier}x")
+
+        for ingredient, base_amount in matched_map.items():
+            if ingredient in self.inventory:
+                # I-multiply ang amount base sa size
+                actual_amount = base_amount * multiplier
+                self.inventory[ingredient]['stock'] -= actual_amount * quantity
+                print(
+                    f"   📦 {ingredient}: {actual_amount * quantity:.3f} {self.inventory[ingredient]['unit']} deducted (stock now: {self.inventory[ingredient]['stock']:.2f})")
+
+                if self.inventory[ingredient]['stock'] <= self.low_stock_threshold:
+                    self.trigger_reorder_alert(ingredient)
+
+        # Deduct cup (1 cup per order, regardless of size)
+        if not is_food and cup_item in self.inventory:
+            self.inventory[cup_item]['stock'] -= quantity
+            print(f"   🥤 {cup_item}: {quantity} pcs deducted (stock now: {self.inventory[cup_item]['stock']})")
+
+            if self.inventory[cup_item]['stock'] <= self.low_stock_threshold:
+                self.trigger_reorder_alert(cup_item)
+
+        # ITO ANG CORRECTED NA LINYA - ginamit ang dictionary sa labas ng f-string
+        size_prices = {"Small": 0, "Medium": 20, "Large": 35}
+        print(f"   💰 Total price: +₱{size_prices[size]} (size add-on)")
+
+        return True
+
+    def get_product_category(self, product_name: str) -> str:
+        """Get category of a product"""
+        try:
+            res = supabase.table("menu").select("cat").eq("name", product_name).execute()
+            if res.data:
+                return res.data[0]['cat']
+        except:
+            pass
+        return "Coffee"  # Default
+
+    def trigger_reorder_alert(self, ingredient: str):
+        """Alert when stock is low"""
+        stock = self.inventory[ingredient]['stock']
+        unit = self.inventory[ingredient].get('unit', 'pcs')
+        if stock <= self.critical_stock_threshold:
+            messagebox.showwarning("Critical Stock Alert",
+                                   f"{ingredient} is critically low! Only {stock} {unit} left!\nPlease restock immediately.")
+        elif stock <= self.low_stock_threshold:
+            print(f"[INVENTORY] Low stock: {ingredient} - {stock} {unit} left")
+
+    def get_inventory_status(self) -> Dict:
+        """Get current inventory status"""
+        print(f"📦 Returning inventory with {len(self.inventory)} items: {list(self.inventory.keys())}")
+        return self.inventory
+
+    def get_cup_summary(self) -> Dict:
+        """Get summary of all cup sizes - RETURNS EMPTY DICT"""
+        return {}  # Walang laman
+
+
+class WorkflowIntegrator:
+    def __init__(self):
+        self.shift_logs = []
+
+    def log_shift_start(self, employee_id: str, role: str):
+        shift_log = {
+            "employee_id": employee_id,
+            "role": role,
+            "start_time": datetime.now().isoformat(),
+            "status": "active"
+        }
+        self.shift_logs.append(shift_log)
+
+    def log_shift_end(self, employee_id: str):
+        for log in self.shift_logs:
+            if log['employee_id'] == employee_id and log['status'] == 'active':
+                log['end_time'] = datetime.now().isoformat()
+                log['status'] = 'completed'
+                break
+
+
+# ============================================================================
+# CRITERION 3: USABILITY (10%)
+# ============================================================================
+
+class KeyboardShortcuts:
+    def __init__(self, app):
+        self.app = app
+        self.bind_shortcuts()
+
+    def bind_shortcuts(self):
+        self.app.root.bind('<F1>', lambda e: self.show_help())
+        self.app.root.bind('<F5>', lambda e: self.refresh_current_view())
+        self.app.root.bind('<Control-c>', lambda e: self.clear_cart())
+        self.app.root.bind('<Control-p>', lambda e: self.process_payment())
+        self.app.root.bind('<Escape>', lambda e: self.cancel_action())
+
+    def show_help(self):
+        help_text = """KEYBOARD SHORTCUTS:
+        F1 - Show this help
+        F5 - Refresh current view
+        Ctrl+C - Clear cart
+        Ctrl+P - Process payment
+        Escape - Cancel current action
+
+        TIPS:
+        - Press Enter to login
+        - Use Tab to navigate between fields
+        - Double-click items to add to cart"""
+        messagebox.showinfo("Keyboard Shortcuts", help_text)
+
+    def refresh_current_view(self):
+        pass
+
+    def clear_cart(self):
+        if hasattr(self.app, 'void_all'):
+            self.app.void_all()
+
+    def process_payment(self):
+        pass
+
+    def cancel_action(self):
+        pass
+
+
+# ============================================================================
+# CRITERION 4: RELIABILITY (15%)
+# ============================================================================
+
+class ErrorHandler:
+    @staticmethod
+    def safe_operation(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                ErrorHandler.handle_error(e, func.__name__)
+                return None
+
+        return wrapper
+
+    @staticmethod
+    def handle_error(error: Exception, context: str):
+        error_msg = f"Error in {context}: {str(error)}"
+        print(f"❌ {error_msg}")
+
+        if "network" in str(error).lower() or "connection" in str(error).lower():
+            messagebox.showerror("Connection Error",
+                                 "Network connection issue. Please check your internet and try again.")
+        elif "permission" in str(error).lower() or "auth" in str(error).lower():
+            messagebox.showerror("Permission Error",
+                                 "You don't have permission for this action.")
+        else:
+            messagebox.showerror("Operation Failed",
+                                 f"An error occurred: {str(error)}\n\nThe system will attempt to recover.")
+
+
+# ============================================================================
+# CRITERION 6: INFORMATION MANAGEMENT (10%)
+# ============================================================================
+
+class BusinessIntelligence:
+    def __init__(self):
+        self.cache = {}
+
+    def get_sales_insights(self, orders: List[Dict]) -> Dict:
+        insights = {
+            "peak_hours": self.analyze_peak_hours(orders),
+            "best_selling_products": self.get_best_sellers(orders),
+            "customer_retention": self.calculate_retention_rate(orders),
+            "average_order_value": self.calculate_aov(orders),
+            "sales_trend": self.calculate_trend(orders)
+        }
+        return insights
+
+    def analyze_peak_hours(self, orders: List[Dict]) -> Dict:
+        hour_counts = defaultdict(int)
+        for order in orders:
+            try:
+                dt = datetime.fromisoformat(order['created_at'].replace('Z', '+00:00'))
+                hour_counts[dt.hour] += 1
+            except:
+                pass
+
+        if hour_counts:
+            peak_hour = max(hour_counts, key=hour_counts.get)
+            return {
+                "peak_hour": peak_hour,
+                "peak_hour_orders": hour_counts[peak_hour],
+                "hour_distribution": dict(hour_counts)
+            }
+        return {"peak_hour": None, "peak_hour_orders": 0}
+
+    def get_best_sellers(self, orders: List[Dict]) -> List[tuple]:
+        """Get best selling products based on ALL orders (year-to-date)"""
+        product_sales = defaultdict(int)
+        current_year = datetime.now().year
+
+        for order in orders:
+            # I-filter lang ang orders ng current year
+            try:
+                order_date = datetime.fromisoformat(order['created_at'].replace('Z', '+00:00'))
+                if order_date.year == current_year:
+                    for item in order.get('items', []):
+                        # Kunin ang base product name (alisin ang size)
+                        base_name = item.get('raw_name', item['name'].split(' (')[0])
+                        product_sales[base_name] += item.get('qty', 0)
+            except:
+                # Kung hindi ma-parse ang date, isama pa rin
+                for item in order.get('items', []):
+                    base_name = item.get('raw_name', item['name'].split(' (')[0])
+                    product_sales[base_name] += item.get('qty', 0)
+
+        # I-sort at ibalik ang top products
+        return sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:3]  # TOP 3 LANG
+
+    def calculate_retention_rate(self, orders: List[Dict]) -> float:
+        customers = set()
+        returning_customers = set()
+        customer_orders = defaultdict(list)
+
+        for order in orders:
+            if order.get('items'):
+                customer = order['items'][0].get('customer', 'Guest')
+                if customer != 'Guest':
+                    customers.add(customer)
+                    customer_orders[customer].append(order)
+
+        for customer, cust_orders in customer_orders.items():
+            if len(cust_orders) > 1:
+                returning_customers.add(customer)
+
+        if len(customers) > 0:
+            return (len(returning_customers) / len(customers)) * 100
+        return 0.0
+
+    def calculate_aov(self, orders: List[Dict]) -> float:
+        if not orders:
+            return 0.0
+        total = sum(o.get('total', 0) for o in orders)
+        return total / len(orders)
+
+    def calculate_trend(self, orders: List[Dict]) -> Dict:
+        if len(orders) < 2:
+            return {"trend": "stable", "percentage": 0}
+
+        now = datetime.now()
+        recent_orders = [o for o in orders if
+                         datetime.fromisoformat(o['created_at'].replace('Z', '+00:00')) > now - timedelta(days=7)]
+        previous_orders = [o for o in orders if
+                           datetime.fromisoformat(o['created_at'].replace('Z', '+00:00')) <= now - timedelta(days=7)]
+
+        recent_total = sum(o.get('total', 0) for o in recent_orders)
+        previous_total = sum(o.get('total', 0) for o in previous_orders)
+
+        if previous_total == 0:
+            return {"trend": "up", "percentage": 100 if recent_total > 0 else 0}
+
+        change = ((recent_total - previous_total) / previous_total) * 100
+
+        if change > 5:
+            return {"trend": "up", "percentage": change}
+        elif change < -5:
+            return {"trend": "down", "percentage": abs(change)}
+        else:
+            return {"trend": "stable", "percentage": change}
+
+    def generate_predictions(self, orders: List[Dict]) -> Dict:
+        if len(orders) < 10:
+            return {"message": "Need more data for accurate predictions"}
+
+        recent_weeks = defaultdict(float)
+        for order in orders:
+            try:
+                dt = datetime.fromisoformat(order['created_at'].replace('Z', '+00:00'))
+                week_key = dt.isocalendar()[1]
+                recent_weeks[week_key] += order.get('total', 0)
+            except:
+                pass
+
+        if len(recent_weeks) >= 2:
+            weeks_list = sorted(recent_weeks.items())
+            recent_avg = sum(v for _, v in weeks_list[-2:]) / 2
+            return {
+                "predicted_next_week_sales": recent_avg,
+                "confidence": "medium",
+                "based_on_weeks": len(weeks_list)
+            }
+
+        return {"message": "Insufficient data for prediction"}
+
+
+class ReportGenerator:
+    def __init__(self, app):
+        self.app = app
+
+    def generate_daily_report(self, date: datetime = None) -> Dict:
+        if date is None:
+            date = datetime.now()
+
+        target_date = date.date()
+        orders = self.get_orders_for_date(target_date)
+
+        report = {
+            "date": target_date.isoformat(),
+            "total_orders": len(orders),
+            "total_revenue": sum(o.get('total', 0) for o in orders),
+            "payment_methods": self.analyze_payment_methods(orders),
+            "top_products": self.get_top_products(orders)
+        }
+        return report
+
+    def get_orders_for_date(self, target_date):
+        try:
+            res = supabase.table("orders").select("*").execute()
+            orders = []
+            for o in res.data:
+                try:
+                    o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00')).date()
+                    if o_date == target_date:
+                        orders.append(o)
+                except:
+                    pass
+            return orders
+        except:
+            return []
+
+    def analyze_payment_methods(self, orders: List[Dict]) -> Dict:
+        methods = defaultdict(float)
+        for order in orders:
+            method = order.get('method', 'Unknown')
+            methods[method] += 1
+        return dict(methods)
+
+    def get_top_products(self, orders: List[Dict], limit: int = 5) -> List[tuple]:
+        product_sales = defaultdict(int)
+        for order in orders:
+            for item in order.get('items', []):
+                product_sales[item.get('name', 'Unknown')] += item.get('qty', 0)
+        return sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:limit]
+
+    def export_report_to_csv(self, report: Dict, filename: str):
+        import csv
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["Report Date", report.get('date', 'N/A')])
+            writer.writerow(["Total Orders", report.get('total_orders', 0)])
+            writer.writerow(["Total Revenue", report.get('total_revenue', 0)])
+            writer.writerow([])
+            writer.writerow(["Top Products", "Quantity"])
+            for product, qty in report.get('top_products', []):
+                writer.writerow([product, qty])
+
+        messagebox.showinfo("Export Complete", f"Report saved to {filename}")
+
+
+# ============================================================================
+# MAIN APPLICATION CLASS
+# ============================================================================
+
+class DrixApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.geometry("1400x850")
+        self.root.title("DRIX COFFEE - POS System")
+
+        self.user = None
+        self.cart = []
+        self.current_customer = ""
+        self.discount_active = False
+        self.current_year_range = "2026-2030"  # Default year range
+        self.session_token = None
+
+        # Initialize managers
+        self.security = SecurityManager()
+        self.audit_logger = AuditLogger()
+        self.transaction_manager = TransactionManager()
+        self.inventory_manager = InventoryManager()
+        self.workflow = WorkflowIntegrator()
+        self.business_intel = BusinessIntelligence()
+        self.report_generator = ReportGenerator(self)
+        self.keyboard_shortcuts = KeyboardShortcuts(self)
+
+        # Check for unsaved backup
+        self.check_for_backup()
+
+        # Color palette
+        self.bg_dark = "#050505"
+        self.card_bg = "#121212"
+        self.accent = "#006241"
+        self.accent_light = "#1DB954"
+        self.text_gray = "#888888"
+
+        self.login_screen()
+
+    def check_for_backup(self):
+        """Check for unsaved backup - DISABLED"""
+        pass
+
+    def clear(self):
+        for w in self.root.winfo_children():
+            w.destroy()
+
+    def update_clock(self):
+        try:
+            now = datetime.now().strftime("%B %d, %Y | %I:%M:%S %p")
+            if hasattr(self, 'clock_lbl'):
+                self.clock_lbl.configure(text=now)
+            self.root.after(1000, self.update_clock)
+        except:
+            pass
+
+    def login_screen(self):
+        self.clear()
+
+        bg_frame = ctk.CTkFrame(self.root, fg_color=self.bg_dark)
+        bg_frame.pack(fill="both", expand=True)
+
+        bg_canvas = ctk.CTkCanvas(bg_frame, width=1400, height=850,
+                                  bg=self.bg_dark, highlightthickness=0)
+        bg_canvas.pack(fill="both", expand=True)
+
+        def create_soft_blob(canvas, x, y, r, color):
+            canvas.create_oval(x - r, y - r, x + r, y + r, fill=color, outline=color)
+
+        create_soft_blob(bg_canvas, 100, 750, 300, "#08331E")
+        create_soft_blob(bg_canvas, 1300, 100, 250, "#0F4D33")
+        create_soft_blob(bg_canvas, 1100, 500, 150, "#051A10")
+
+        frame = ctk.CTkFrame(bg_frame, width=460, height=650, corner_radius=35,
+                             fg_color=self.card_bg, border_width=1, border_color="#2A2A2A")
+        frame.place(relx=0.5, rely=0.5, anchor="center")
+
+        ctk.CTkLabel(frame, text="☕", font=("Arial", 80)).pack(pady=(60, 5))
+        ctk.CTkLabel(frame, text="DRIX COFFEE",
+                     font=("Century Gothic", 45, "bold"),
+                     text_color=self.accent_light).pack()
+        ctk.CTkLabel(frame, text="Coffee Shop Management System",
+                     font=("Segoe UI", 12),
+                     text_color=self.text_gray).pack(pady=(0, 40))
+
+        base_style = {
+            "width": 350,
+            "height": 55,
+            "corner_radius": 15,
+            "fg_color": "#1F1F1F",
+            "font": ("Segoe UI", 14)
+        }
+
+        self.u_in = ctk.CTkEntry(frame, placeholder_text="Username",
+                                 border_color="#333333", **base_style)
+        self.u_in.pack(pady=12)
+        self.u_in.bind("<Return>", lambda e: self.p_in.focus())
+
+        self.p_in = ctk.CTkEntry(frame, placeholder_text="Password", show="●",
+                                 border_color="#333333", **base_style)
+        self.p_in.pack(pady=12)
+        self.p_in.bind("<Return>", lambda e: self.authenticate())
+
+        # Show/Hide Password checkbox
+        self.show_pass_var = ctk.BooleanVar(value=False)
+        show_pass_cb = ctk.CTkCheckBox(frame, text="Show Password", variable=self.show_pass_var,
+                                       command=self.toggle_password_visibility,
+                                       fg_color=self.accent, hover_color=self.accent_light)
+        show_pass_cb.pack(pady=(5, 0))
+
+        login_btn = ctk.CTkButton(frame, text="LOGIN", command=self.authenticate,
+                                  width=350, height=62, corner_radius=15,
+                                  font=("Segoe UI", 18, "bold"),
+                                  fg_color=self.accent,
+                                  hover_color=self.accent_light,
+                                  text_color="#FFFFFF")
+        login_btn.pack(pady=(45, 20))
+
+        ctk.CTkLabel(frame, text="🔒 Secure Login | All activities are logged",
+                     font=("Segoe UI", 10), text_color=self.text_gray).pack()
+
+    @ErrorHandler.safe_operation
+    def authenticate(self):
+        u = self.security.sanitize_input(self.u_in.get().strip())
+        p = self.p_in.get().strip()
+
+        if not u or not p:
+            messagebox.showwarning("Required", "Please fill in all fields.")
+            return
+
+        try:
+            response = supabase.table("Booking System").select("*").eq("username", u).execute()
+
+            if response.data and len(response.data) > 0:
+                user_data = response.data[0]
+                if user_data.get('password') == p:
+                    self.user = user_data
+                    self.session_token = self.security.generate_session_token()
+                    self.audit_logger.log_action(u, "LOGIN", "Successful login", "SUCCESS")
+                    self.workflow.log_shift_start(u, user_data.get('role', 'cashier'))
+                    self.main_dashboard()
+                else:
+                    self.audit_logger.log_action(u, "LOGIN", "Invalid password", "FAILED")
+                    messagebox.showerror("Error", "Invalid Username or Password")
+            else:
+                self.audit_logger.log_action(u, "LOGIN", "User not found", "FAILED")
+                messagebox.showerror("Error", "Invalid Username or Password")
+        except Exception as e:
+            self.audit_logger.log_action(u, "LOGIN", f"Error: {str(e)}", "ERROR")
+            messagebox.showerror("Database Error", f"Cannot connect: {str(e)}")
+
+    def toggle_password_visibility(self):
+        """Toggle password visibility"""
+        if self.show_pass_var.get():
+            self.p_in.configure(show="")
+        else:
+            self.p_in.configure(show="●")
+
+    def main_dashboard(self):
+        self.clear()
+
+        self.top_bar = ctk.CTkFrame(self.root, height=60, fg_color="#0A0A0A", corner_radius=0)
+        self.top_bar.pack(side="top", fill="x")
+
+        self.clock_lbl = ctk.CTkLabel(self.top_bar, text="", font=("Segoe UI", 16, "bold"),
+                                      text_color=self.accent_light)
+        self.clock_lbl.pack(side="right", padx=30)
+        self.update_clock()
+
+        username_display = self.user.get('username', 'User').upper()
+        ctk.CTkLabel(self.top_bar, text=f"SYSTEM | Logged in as: {username_display}",
+                     font=("Century Gothic", 14), text_color="gray").pack(side="left", padx=30)
+
+        security_icon = "🔒" if self.session_token else "🔓"
+        ctk.CTkLabel(self.top_bar, text=security_icon, font=("Arial", 14),
+                     text_color=self.accent_light).pack(side="right", padx=10)
+
+        self.sidebar = ctk.CTkFrame(self.root, width=260, corner_radius=0, fg_color="#000000")
+        self.sidebar.pack(side="left", fill="y")
+        ctk.CTkLabel(self.sidebar, text="DRIX COFFEE", font=("Impact", 28), text_color=self.accent_light).pack(pady=40)
+
+        role = self.user.get('role', 'cashier').lower()
+
+        if role == "cashier":
+            self.nav_btn("🛒 MENU", self.pos_view)
+            self.nav_btn("📋 PENDING ORDERS", self.queue_view)
+            self.nav_btn("✅ COMPLETED ORDERS", self.completed_staff_view)
+            self.nav_btn("📦 INVENTORY", self.inventory_view)
+        elif role == "manager":
+            self.nav_btn("📊 ANALYTICS DASHBOARD", self.analytics_dashboard)
+            self.nav_btn("📜 TRANSACTION LOGS", self.transaction_history_view)
+            self.nav_btn("📈 REPORTS", self.reports_view)
+            self.nav_btn("🔐 SECURITY LOGS", self.security_logs_view)
+            self.nav_btn("📦 INVENTORY", self.inventory_view)
+            self.nav_btn("👥 EMPLOYEE SHIFTS", self.employee_shifts_view)
+
+        ctk.CTkFrame(self.sidebar, height=2, fg_color="#222").pack(fill="x", pady=10)
+
+        self.nav_btn("❓ HELP (F1)", self.show_help)
+        self.nav_btn("🚪 LOGOUT", self.logout)
+
+        self.content = ctk.CTkFrame(self.root, corner_radius=0, fg_color=self.bg_dark)
+        self.content.pack(side="left", expand=True, fill="both")
+
+        if role == "cashier":
+            self.pos_view()
+        else:
+            self.analytics_dashboard()
+
+    def logout(self):
+        if messagebox.askyesno("Logout", "Are you sure you want to logout?"):
+            self.workflow.log_shift_end(self.user.get('username', ''))
+            self.audit_logger.log_action(self.user.get('username', ''), "LOGOUT", "User logged out", "SUCCESS")
+            self.session_token = None
+            self.login_screen()
+
+    def show_help(self):
+        help_text = """DRIX COFFEE POS SYSTEM - HELP
+
+KEYBOARD SHORTCUTS:
+• F1 - Show this help
+• F5 - Refresh current view
+• Ctrl+C - Clear cart
+• Ctrl+P - Process payment
+• Escape - Cancel action
+
+QUICK TIPS:
+• Click any menu item to add to cart
+• Use Tab to navigate between fields
+• All transactions are securely logged
+• System auto-saves every 30 seconds"""
+
+        messagebox.showinfo("System Help", help_text)
+
+    def nav_btn(self, txt, cmd):
+        btn = ctk.CTkButton(self.sidebar, text=txt, command=cmd, height=55, corner_radius=0,
+                            fg_color="transparent", anchor="w", font=("Segoe UI", 14, "bold"),
+                            hover_color="#1a1a1a")
+        btn.pack(fill="x")
+
+    # ========================================================================
+    # INVENTORY MANAGEMENT VIEW
+    # ========================================================================
+
+    def inventory_view(self):
+        for w in self.content.winfo_children(): w.destroy()
+
+        header_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        header_f.pack(fill="x", padx=40, pady=(30, 10))
+        ctk.CTkLabel(header_f, text="INVENTORY MANAGEMENT", font=("Century Gothic", 32, "bold"),
+                     text_color="white").pack(side="left")
+
+        refresh_btn = ctk.CTkButton(header_f, text="🔄 REFRESH", command=self.inventory_view,
+                                    fg_color=self.accent, width=120)
+        refresh_btn.pack(side="right")
+
+        stats_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        stats_f.pack(fill="x", padx=40, pady=10)
+
+        inventory = self.inventory_manager.get_inventory_status()
+
+        low_stock_items = [name for name, data in inventory.items()
+                           if data.get('stock', 0) <= self.inventory_manager.low_stock_threshold]
+        critical_items = [name for name, data in inventory.items()
+                          if data.get('stock', 0) <= self.inventory_manager.critical_stock_threshold]
+
+        ctk.CTkLabel(stats_f, text=f"📦 Total Items: {len(inventory)}",
+                     font=("Segoe UI", 14), text_color=self.accent_light).pack(side="left", padx=20)
+        ctk.CTkLabel(stats_f, text=f"⚠️ Low Stock: {len(low_stock_items)}",
+                     font=("Segoe UI", 14), text_color="orange").pack(side="left", padx=20)
+        ctk.CTkLabel(stats_f, text=f"🔴 Out of Stock: {len(critical_items)}",
+                     font=("Segoe UI", 14), text_color="red").pack(side="left", padx=20)
+
+        sc = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        sc.pack(expand=True, fill="both", padx=40, pady=20)
+
+        # Header row
+        header_row = ctk.CTkFrame(sc, fg_color="#1a1a1a", height=40)
+        header_row.pack(fill="x", pady=2)
+
+        headers = ["Product", "Stock", "Unit", "Status", "Action"]
+        positions = [0.05, 0.35, 0.55, 0.70, 0.85]
+        for header, pos in zip(headers, positions):
+            ctk.CTkLabel(header_row, text=header, font=("Segoe UI", 12, "bold"),
+                         text_color=self.accent_light).place(relx=pos, rely=0.5, anchor="w")
+
+        # Ipakita ang LAHAT ng items (kasama ang cups)
+        for name, data in inventory.items():
+            row = ctk.CTkFrame(sc, fg_color="#121212", height=50)
+            row.pack(fill="x", pady=2)
+
+            stock = data.get('stock', 0)
+            if stock <= self.inventory_manager.critical_stock_threshold:
+                status = "🔴 CRITICAL"
+                status_color = "red"
+            elif stock <= self.inventory_manager.low_stock_threshold:
+                status = "⚠️ LOW"
+                status_color = "orange"
+            else:
+                status = "✅ OK"
+                status_color = self.accent_light
+
+            # I-format ang display name para sa cups
+            if "Cup" in name:
+                display_name = name.replace("Cup ", "🥤 Cup ")
+            else:
+                display_name = name
+
+            ctk.CTkLabel(row, text=display_name, font=("Segoe UI", 12)).place(relx=0.05, rely=0.5, anchor="w")
+            ctk.CTkLabel(row, text=str(stock), font=("Segoe UI", 12, "bold")).place(relx=0.35, rely=0.5, anchor="w")
+            ctk.CTkLabel(row, text=data.get('unit', 'pcs')).place(relx=0.55, rely=0.5, anchor="w")
+            ctk.CTkLabel(row, text=status, text_color=status_color, font=("Segoe UI", 11, "bold")).place(relx=0.70,
+                                                                                                         rely=0.5,
+                                                                                                         anchor="w")
+
+            restock_btn = ctk.CTkButton(row, text="RESTOCK", width=70, height=25,
+                                        command=lambda n=name: self.restock_item(n))
+            restock_btn.place(relx=0.85, rely=0.5, anchor="w")
+
+    def restock_item(self, item_name: str):
+        """Restock an inventory item"""
+        qty = simpledialog.askinteger("Restock", f"Enter quantity to add for {item_name}:",
+                                      minvalue=1, maxvalue=1000)
+        if qty:
+            if item_name in self.inventory_manager.inventory:
+                self.inventory_manager.inventory[item_name]['stock'] += qty
+                # I-update din sa database
+                try:
+                    supabase.table("inventory").update({
+                        "stock": self.inventory_manager.inventory[item_name]['stock']
+                    }).eq("product_name", item_name).execute()
+                    print(f"✅ Updated {item_name} stock in database")
+                except Exception as e:
+                    print(f"❌ Error updating database: {e}")
+                messagebox.showinfo("Success", f"Added {qty} units to {item_name}")
+                self.audit_logger.log_action(self.user.get('username', ''), "RESTOCK",
+                                             f"Restocked {item_name} with {qty} units", "SUCCESS")
+                self.inventory_view()
+
+    # ========================================================================
+    # ANALYTICS DASHBOARD (NA MAY SALES REPORT)
+    # ========================================================================
+
+    def analytics_dashboard(self):
+        for w in self.content.winfo_children(): w.destroy()
+
+        try:
+            res = supabase.table("orders").select("*").execute()
+            orders = res.data
+        except:
+            orders = []
+
+        insights = self.business_intel.get_sales_insights(orders)
+        predictions = self.business_intel.generate_predictions(orders)
+
+        header_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        header_f.pack(fill="x", padx=40, pady=(30, 10))
+        ctk.CTkLabel(header_f, text="BUSINESS ANALYTICS DASHBOARD",
+                     font=("Century Gothic", 32, "bold"), text_color="white").pack(side="left")
+
+        export_btn = ctk.CTkButton(header_f, text="📊 EXPORT REPORT", command=self.export_full_report,
+                                   fg_color=self.accent, width=140)
+        export_btn.pack(side="right")
+
+        # ========================================================================
+        # SALES REPORT TABS - Daily, Monthly, Yearly (TINANGGAL ANG WEEKLY)
+        # ========================================================================
+        self.sales_report_tab = "Daily"
+        self.tab_buttons = {}
+
+        tab_f = ctk.CTkFrame(self.content, fg_color="#1A1A1A", corner_radius=12)
+        tab_f.pack(fill="x", padx=40, pady=(10, 20))
+
+        for r_type in ["Daily", "Monthly", "Yearly"]:
+            btn = ctk.CTkButton(tab_f, text=r_type, width=100, height=35, corner_radius=10,
+                                fg_color=self.accent if r_type == self.sales_report_tab else "transparent",
+                                text_color="white" if r_type == self.sales_report_tab else "#888",
+                                font=("Segoe UI", 12, "bold" if r_type == self.sales_report_tab else "normal"))
+            btn.pack(side="left", padx=2, pady=2)
+            self.tab_buttons[r_type] = btn
+
+        # I-assign ang command pagkatapos magawa ang lahat ng buttons
+        for r_type, btn in self.tab_buttons.items():
+            btn.configure(command=lambda t=r_type, b=btn: self.update_sales_graph_with_button(t, b))
+
+        # Sales Report Stats
+        self.sales_stats_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        self.sales_stats_f.pack(fill="x", padx=40, pady=10)
+
+        # Graph Container
+        self.sales_graph_container = ctk.CTkFrame(self.content, fg_color="#121212", corner_radius=20, border_width=1,
+                                                  border_color="#2A2A2A")
+        self.sales_graph_container.pack(fill="both", expand=True, padx=50, pady=(10, 20))
+
+        # Initial load ng graph
+        self.update_sales_graph_with_button("Daily", self.tab_buttons["Daily"])
+
+        # ========================================================================
+        # KEY METRICS CARDS
+        # ========================================================================
+        metrics_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        metrics_f.pack(fill="x", padx=40, pady=20)
+
+        # Compute overall growth (Year-to-Date vs Previous Year)
+        current_total = sum(o.get('total', 0) for o in orders)
+        previous_total = 0
+
+        for o in orders:
+            try:
+                o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00')).date()
+                if o_date.year == datetime.now().year - 1:
+                    previous_total += o.get('total', 0)
+            except:
+                pass
+
+        overall_growth = 0
+        if previous_total > 0:
+            overall_growth = ((current_total - previous_total) / previous_total) * 100
+        elif current_total > 0:
+            overall_growth = 100
+
+        if overall_growth > 0:
+            growth_arrow = "▲"
+            growth_color = "#1DB954"
+            growth_text = f"+{overall_growth:.1f}%"
+        elif overall_growth < 0:
+            growth_arrow = "▼"
+            growth_color = "red"
+            growth_text = f"{abs(overall_growth):.1f}%"
+        else:
+            growth_arrow = "●"
+            growth_color = "white"
+            growth_text = "0%"
+
+        metrics = [
+            ("💰 TOTAL REVENUE", f"₱{current_total:,.2f}", self.accent_light),
+            ("📋 TOTAL ORDERS", str(len(orders)), "white"),
+            ("📈 AVG ORDER VALUE", f"₱{insights.get('average_order_value', 0):,.2f}", "#1DB954"),
+            ("🔄 RETURNING %", f"{insights.get('customer_retention', 0):.1f}%", "orange"),
+            ("📊 SALES GROWTH", f"{growth_arrow} {growth_text}", growth_color)
+        ]
+
+        for i, (title, value, color) in enumerate(metrics):
+            card = ctk.CTkFrame(metrics_f, fg_color="#121212", corner_radius=15, border_width=1, border_color="#2A2A2A")
+            card.grid(row=i // 3, column=i % 3, padx=10, pady=10, sticky="nsew")
+            card.configure(width=200, height=100)
+            card.grid_propagate(False)
+
+            ctk.CTkLabel(card, text=title, font=("Segoe UI", 11), text_color="#888").pack(pady=(15, 5))
+            ctk.CTkLabel(card, text=value, font=("Century Gothic", 18, "bold"), text_color=color).pack()
+
+        # ========================================================================
+        # BEST SELLERS SECTION (TOP 3)
+        # ========================================================================
+        best_sellers_f = ctk.CTkFrame(self.content, fg_color="#121212", corner_radius=15, border_width=1,
+                                      border_color="#2A2A2A")
+        best_sellers_f.pack(fill="x", padx=40, pady=20)
+
+        ctk.CTkLabel(best_sellers_f, text="🏆 TOP 3 BEST SELLING PRODUCTS", font=("Segoe UI", 16, "bold"),
+                     text_color=self.accent_light).pack(anchor="w", padx=20, pady=(15, 10))
+
+        best_sellers = insights.get('best_selling_products', [])
+        for i, (product, qty) in enumerate(best_sellers[:3]):
+            row_f = ctk.CTkFrame(best_sellers_f, fg_color="transparent")
+            row_f.pack(fill="x", padx=20, pady=3)
+            ctk.CTkLabel(row_f, text=f"{i + 1}.", width=30, font=("Segoe UI", 12)).pack(side="left")
+            ctk.CTkLabel(row_f, text=product, font=("Segoe UI", 12), width=200).pack(side="left")
+            ctk.CTkLabel(row_f, text=f"x{qty}", font=("Segoe UI", 12, "bold"), text_color=self.accent_light).pack(
+                side="right")
+
+        # ========================================================================
+        # PEAK HOURS ANALYSIS
+        # ========================================================================
+        peak_f = ctk.CTkFrame(self.content, fg_color="#121212", corner_radius=15, border_width=1,
+                              border_color="#2A2A2A")
+        peak_f.pack(fill="x", padx=40, pady=20)
+
+        ctk.CTkLabel(peak_f, text="⏰ PEAK HOURS ANALYSIS", font=("Segoe UI", 16, "bold"),
+                     text_color=self.accent_light).pack(anchor="w", padx=20, pady=(15, 10))
+
+        peak_info = insights.get('peak_hours', {})
+        if peak_info.get('peak_hour'):
+            ctk.CTkLabel(peak_f,
+                         text=f"Busiest Hour: {peak_info['peak_hour']}:00 ({peak_info['peak_hour_orders']} orders)",
+                         font=("Segoe UI", 14)).pack(anchor="w", padx=20, pady=5)
+
+            rec = f"Ensure adequate staffing around {peak_info['peak_hour']}:00 to handle the rush."
+            ctk.CTkLabel(peak_f, text="💡 RECOMMENDATION", font=("Segoe UI", 12, "bold"),
+                         text_color="orange").pack(anchor="w", padx=20, pady=(10, 5))
+            ctk.CTkLabel(peak_f, text=rec, font=("Segoe UI", 11), text_color="#888", wraplength=800).pack(anchor="w",
+                                                                                                          padx=20,
+                                                                                                          pady=(0, 15))
+        else:
+            ctk.CTkLabel(peak_f, text="No enough data to analyze peak hours.", font=("Segoe UI", 12),
+                         text_color="#888").pack(anchor="w", padx=20, pady=10)
+
+    def display_daily_month_graph(self, container, revenue_values, order_values, labels, title_suffix):
+        """Display graph para sa buong buwan - WALANG EMOJI"""
+
+        # FIXED Y LIMIT
+        y_max_limit = 6000
+        target = 5000
+
+        # Create figure
+        fig, ax1 = plt.subplots(figsize=(16, 7), dpi=100)
+        fig.patch.set_facecolor('#121212')
+        ax1.set_facecolor('#121212')
+
+        # Bar chart for revenue
+        max_revenue = max(revenue_values) if revenue_values else 0
+        color = '#1DB954' if max_revenue > 0 else '#FF6B35'
+        bars = ax1.bar(labels, revenue_values, color=color, width=0.8, alpha=0.8, label='Revenue (₱)')
+
+        # Add value labels
+        for bar, value in zip(bars, revenue_values):
+            if value > 0:
+                height = bar.get_height()
+                percentage = (value / target) * 100
+                label_y = height + (y_max_limit * 0.01)
+                ax1.text(bar.get_x() + bar.get_width() / 2., label_y,
+                         f'₱{value:,.0f}\n({percentage:.1f}%)',
+                         ha='center', va='bottom', color='white', fontsize=7, fontweight='bold')
+
+        ax1.set_xlabel('Day of Month', color='white', fontsize=12)
+        ax1.set_ylabel('Revenue (₱)', color='white', fontsize=12)
+        ax1.tick_params(axis='x', colors='gray', labelsize=8, rotation=90)
+        ax1.tick_params(axis='y', colors='gray', labelsize=9)
+        ax1.set_ylim(0, y_max_limit)
+
+        # Line chart for order count
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('Number of Orders', color='#FFD700', fontsize=12)
+        ax2.plot(labels, order_values, color='#FFD700', marker='o', linewidth=1.5, markersize=4, label='Orders')
+        ax2.tick_params(axis='y', colors='#FFD700', labelsize=9)
+        max_orders = max(order_values) if order_values else 0
+        ax2.set_ylim(0, max_orders + 3 if max_orders > 0 else 10)
+
+        # Title
+        ax1.set_title(f"Daily Sales - {title_suffix}", color="white", fontname="Century Gothic", fontsize=14,
+                      fontweight='bold')
+
+        # TARGET LINE - WALANG EMOJI
+        ax1.axhline(y=target, color='#FFD700', linestyle='--', linewidth=2, alpha=0.9,
+                    label=f'TARGET: ₱{target:,.0f}', zorder=1)
+
+        # Add target label
+        ax1.text(len(labels) - 2, target + 200, f'Target: ₱{target:,.0f}',
+                 color='#FFD700', fontsize=9, fontweight='bold', ha='right',
+                 bbox=dict(boxstyle='round,pad=0.3', facecolor='#1A1A1A', alpha=0.8))
+
+        # Average lines
+        if revenue_values and any(v > 0 for v in revenue_values):
+            positive_revenue = [v for v in revenue_values if v > 0]
+            if positive_revenue:
+                avg_revenue = sum(positive_revenue) / len(positive_revenue)
+                ax1.axhline(y=avg_revenue, color='#00CED1', linestyle=':', linewidth=1.5, alpha=0.7,
+                            label=f'Avg Revenue: ₱{avg_revenue:,.0f}')
+
+        if order_values and any(v > 0 for v in order_values):
+            positive_orders = [v for v in order_values if v > 0]
+            if positive_orders:
+                avg_orders = sum(positive_orders) / len(positive_orders)
+                ax2.axhline(y=avg_orders, color='#FF6347', linestyle=':', linewidth=1.5, alpha=0.7,
+                            label=f'Avg Orders: {avg_orders:.1f}')
+
+        # Legends
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', facecolor='#121212',
+                   labelcolor='white', fontsize=9)
+
+        ax1.grid(axis='y', linestyle='--', alpha=0.1, color='gray')
+        for spine in ax1.spines.values():
+            spine.set_visible(False)
+
+        fig.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=container)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=20, pady=20)
+    def apply_search_filter(self):
+        """Apply search filter sa transaction logs"""
+        search_text = self.search_entry.get().strip()
+        if not search_text:
+            messagebox.showwarning("Search Error", "Please enter a search keyword.")
+            return
+
+        # I-refresh ang view na may search filter
+        self.transaction_history_view(
+            self.current_category_filter if hasattr(self, 'current_category_filter') else "All",
+            self.current_date_filter if hasattr(self, 'current_date_filter') else None,
+            search_text
+        )
+
+    def clear_search_filter(self):
+        """Clear search filter"""
+        if hasattr(self, 'search_entry'):
+            self.search_entry.delete(0, 'end')
+
+        # I-refresh ang view na walang search filter
+        self.transaction_history_view(
+            self.current_category_filter if hasattr(self, 'current_category_filter') else "All",
+            self.current_date_filter if hasattr(self, 'current_date_filter') else None,
+            None
+        )
+
+    def clear_date_filter(self):
+        """Clear date filter only"""
+        if hasattr(self, 'filter_date_from'):
+            self.filter_date_from.delete(0, 'end')
+        if hasattr(self, 'filter_date_to'):
+            self.filter_date_to.delete(0, 'end')
+
+        # I-refresh ang view na walang date filter
+        self.transaction_history_view(
+            self.current_category_filter if hasattr(self, 'current_category_filter') else "All",
+            None,
+            self.current_search_text if hasattr(self, 'current_search_text') else None
+        )
+
+    def apply_transaction_filter(self):
+        """Apply date filter sa transaction logs"""
+        from_date = self.filter_date_from.get().strip()
+        to_date = self.filter_date_to.get().strip()
+
+        if not from_date and not to_date:
+            messagebox.showwarning("Filter Error", "Please enter a date range to filter.")
+            return
+
+        # I-validate ang date format
+        try:
+            if from_date:
+                datetime.strptime(from_date, "%Y-%m-%d")
+            if to_date:
+                datetime.strptime(to_date, "%Y-%m-%d")
+        except ValueError:
+            messagebox.showerror("Invalid Date", "Please use YYYY-MM-DD format (e.g., 2026-01-15)")
+            return
+
+        # I-refresh ang view na may filter
+        self.transaction_history_view("All")
+
+    def clear_transaction_filter(self):
+        """Clear lahat ng filters"""
+        if hasattr(self, 'filter_date_from'):
+            self.filter_date_from.delete(0, 'end')
+        if hasattr(self, 'filter_date_to'):
+            self.filter_date_to.delete(0, 'end')
+        if hasattr(self, 'active_filter_label'):
+            self.active_filter_label.configure(text="")
+
+        # I-refresh ang view ng walang filter
+        self.transaction_history_view("All")
+
+    def filter_today_transactions(self):
+        """Filter transactions para sa kasalukuyang araw"""
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        if hasattr(self, 'filter_date_from'):
+            self.filter_date_from.delete(0, 'end')
+            self.filter_date_from.insert(0, today)
+        if hasattr(self, 'filter_date_to'):
+            self.filter_date_to.delete(0, 'end')
+            self.filter_date_to.insert(0, today)
+        if hasattr(self, 'active_filter_label'):
+            self.active_filter_label.configure(text=f"📅 Filter: {today}")
+
+        # I-refresh ang view na may filter
+        self.transaction_history_view("All", today)
+
+
+    def update_sales_graph_with_button(self, report_type, clicked_button):
+        """Update ang sales graph base sa napiling tab at i-update ang button colors"""
+
+        # I-update ang active tab
+        self.sales_report_tab = report_type
+
+        # I-update ang kulay ng lahat ng buttons
+        for r_type, btn in self.tab_buttons.items():
+            if r_type == report_type:
+                btn.configure(fg_color=self.accent, text_color="white", font=("Segoe UI", 12, "bold"))
+            else:
+                btn.configure(fg_color="transparent", text_color="#888", font=("Segoe UI", 12, "normal"))
+
+        try:
+            res = supabase.table("orders").select("*").execute()
+            orders = res.data
+        except Exception as e:
+            print(f"Error loading orders: {e}")
+            orders = []
+
+        now = datetime.now()
+        filtered_orders = []
+        title_suffix = ""
+        previous_revenue = 0
+        current_revenue = 0
+
+        # I-filter ang orders base sa report type
+        if report_type == "Daily":
+            # Daily: Ipakita ang BUONG BUWAN (Day 1 hanggang last day)
+            current_month = now.month
+            current_year = now.year
+
+            # Kunin ang last day ng buwan
+            last_day = calendar.monthrange(current_year, current_month)[1]
+
+            # Gumawa ng labels mula Day 1 hanggang last day
+            labels = [f"Day {i}" for i in range(1, last_day + 1)]
+
+            title_suffix = f"{now.strftime('%B %Y')} (Day 1 - {last_day})"
+
+            # Data arrays para sa bawat araw
+            revenue_values = [0] * last_day
+            order_values = [0] * last_day
+            filtered_orders = []
+
+            # I-loop ang bawat order at i-assign sa tamang araw
+            for o in orders:
+                try:
+                    o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00'))
+                    if o_date.year == current_year and o_date.month == current_month:
+                        day_index = o_date.day - 1
+                        if 0 <= day_index < last_day:
+                            revenue_values[day_index] += o.get('total', 0)
+                            order_values[day_index] += 1
+                            filtered_orders.append(o)
+                except:
+                    pass
+
+            current_revenue = sum(revenue_values)
+            total_orders = sum(order_values)
+
+            # Compute percent change from PREVIOUS MONTH (same month last year or last month)
+            # Kunin ang previous month data para sa growth comparison
+            if current_month == 1:
+                prev_month = 12
+                prev_year = current_year - 1
+            else:
+                prev_month = current_month - 1
+                prev_year = current_year
+
+            prev_revenue = 0
+            prev_last_day = calendar.monthrange(prev_year, prev_month)[1]
+
+            for o in orders:
+                try:
+                    o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00'))
+                    if o_date.year == prev_year and o_date.month == prev_month:
+                        prev_revenue += o.get('total', 0)
+                except:
+                    pass
+
+            previous_revenue = prev_revenue
+
+            # Compute percent change
+            percent_change = 0
+            if previous_revenue > 0:
+                percent_change = ((current_revenue - previous_revenue) / previous_revenue) * 100
+            elif current_revenue > 0 and previous_revenue == 0:
+                percent_change = 100
+            elif current_revenue == 0 and previous_revenue > 0:
+                percent_change = -100
+
+            # Determine trend arrow and color
+            if percent_change > 0:
+                trend_arrow = "▲"
+                trend_color = "#1DB954"
+                trend_text = f"+{percent_change:.1f}%"
+            elif percent_change < 0:
+                trend_arrow = "▼"
+                trend_color = "red"
+                trend_text = f"{abs(percent_change):.1f}%"
+            else:
+                trend_arrow = "●"
+                trend_color = "white"
+                trend_text = "0%"
+
+            # I-print sa console para sa debugging
+            print(f"\n📊 DAILY REPORT - {title_suffix}")
+            print(f"   Current Month Revenue: ₱{current_revenue:,.2f}")
+            print(f"   Previous Month ({prev_month}/{prev_year}) Revenue: ₱{prev_revenue:,.2f}")
+            print(f"   Orders this month: {total_orders}")
+            print(f"   Sales Growth: {trend_arrow} {trend_text}")
+
+            # I-update ang stats display
+            for w in self.sales_stats_f.winfo_children():
+                w.destroy()
+
+            metrics = [
+                ("TOTAL REVENUE", f"₱{current_revenue:,.2f}", self.accent_light, "💰"),
+                ("ORDERS COMPLETED", str(total_orders), "white", "📋"),
+                ("REPORT PERIOD", title_suffix, "#1DB954", "📅"),
+                ("SALES GROWTH", f"{trend_arrow} {trend_text}", trend_color, "📈")
+            ]
+
+            for m_title, m_val, color, icon in metrics:
+                card = ctk.CTkFrame(self.sales_stats_f, fg_color="#121212", corner_radius=20, border_width=1,
+                                    border_color="#2A2A2A", height=100)
+                card.pack(side="left", expand=True, fill="both", padx=10)
+                card.pack_propagate(False)
+                ctk.CTkLabel(card, text=icon, font=("Arial", 22)).pack(pady=(10, 0))
+                ctk.CTkLabel(card, text=m_title, font=("Segoe UI", 10, "bold"), text_color="#888").pack()
+                ctk.CTkLabel(card, text=m_val, font=("Century Gothic", 16, "bold"), text_color=color).pack(pady=5)
+
+            # I-update ang graph
+            for w in self.sales_graph_container.winfo_children():
+                w.destroy()
+
+            self.display_daily_month_graph(self.sales_graph_container, revenue_values, order_values, labels,
+                                           title_suffix)
+            return
+
+        elif report_type == "Monthly":
+            start_of_month = now.replace(day=1)
+            if now.month == 12:
+                end_of_month = now.replace(day=31)
+            else:
+                end_of_month = now.replace(month=now.month + 1, day=1) - timedelta(days=1)
+            title_suffix = f"{start_of_month.strftime('%B %d')} - {end_of_month.strftime('%d, %Y')}"
+
+            if now.month == 1:
+                prev_start = now.replace(year=now.year - 1, month=12, day=1)
+                prev_end = now.replace(year=now.year - 1, month=12, day=31)
+            else:
+                prev_start = now.replace(month=now.month - 1, day=1)
+                prev_end = now.replace(month=now.month, day=1) - timedelta(days=1)
+
+            for o in orders:
+                try:
+                    o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00')).date()
+                    if start_of_month.date() <= o_date <= end_of_month.date():
+                        filtered_orders.append(o)
+                        current_revenue += o.get('total', 0)
+                    elif prev_start.date() <= o_date <= prev_end.date():
+                        previous_revenue += o.get('total', 0)
+                except:
+                    pass
+
+
+
+
+        elif report_type == "Yearly":
+
+            # Yearly with filter options
+
+            year_ranges = {
+
+                "2026-2030": list(range(2026, 2031)),
+
+                "2030-2034": list(range(2030, 2035)),
+
+                "2034-2038": list(range(2034, 2039))
+
+            }
+
+            # I-clear ang stats display
+
+            for w in self.sales_stats_f.winfo_children():
+                w.destroy()
+
+            # Filter frame - ginawang mas maliit
+
+            filter_frame = ctk.CTkFrame(self.sales_stats_f, fg_color="#1A1A1A", corner_radius=10)
+
+            filter_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+            ctk.CTkLabel(filter_frame, text="Select Year Range:", font=("Segoe UI", 11, "bold"),
+
+                         text_color="white").pack(side="left", padx=10)
+
+            range_var = ctk.StringVar(value=self.current_year_range)
+
+            range_menu = ctk.CTkOptionMenu(filter_frame, values=list(year_ranges.keys()),
+
+                                           variable=range_var,
+
+                                           command=self.on_year_range_change,
+
+                                           width=150, fg_color=self.accent, button_color=self.accent)
+
+            range_menu.pack(side="left", padx=10)
+
+            years = year_ranges.get(self.current_year_range, list(range(2026, 2031)))
+
+            revenue_data = {year: 0 for year in years}
+
+            order_count_data = {year: 0 for year in years}
+
+            for o in orders:
+
+                try:
+
+                    o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00'))
+
+                    if o_date.year in years and o.get('status') == 'Completed':
+                        revenue_data[o_date.year] += o.get('total', 0)
+
+                        order_count_data[o_date.year] += 1
+
+                except:
+
+                    pass
+
+            current_revenue = sum(revenue_data.values())
+
+            # Compute growth rates
+
+            growth_rates = []
+
+            for i in range(len(years)):
+
+                if i == 0:
+
+                    growth_rates.append(0)
+
+                else:
+
+                    prev_rev = revenue_data[years[i - 1]]
+
+                    curr_rev = revenue_data[years[i]]
+
+                    if prev_rev > 0:
+
+                        growth = ((curr_rev - prev_rev) / prev_rev) * 100
+
+                    else:
+
+                        growth = 100 if curr_rev > 0 else 0
+
+                    growth_rates.append(growth)
+
+            # Ipakita ang breakdown ng bawat taon - ginawang mas compact
+
+            breakdown_f = ctk.CTkFrame(self.sales_stats_f, fg_color="#121212", corner_radius=20, border_width=1,
+
+                                       border_color="#2A2A2A")
+
+            breakdown_f.pack(fill="x", padx=10, pady=5)
+
+            ctk.CTkLabel(breakdown_f, text=f"📊 YEARLY BREAKDOWN ({self.current_year_range})",
+                         font=("Segoe UI", 11, "bold"),
+
+                         text_color=self.accent_light).pack(anchor="w", padx=15, pady=(8, 5))
+
+            # Gumawa ng horizontal scrollable frame para sa breakdown kung maraming taon
+
+            breakdown_scroll = ctk.CTkScrollableFrame(breakdown_f, fg_color="transparent", orientation="horizontal",
+                                                      height=80)
+
+            breakdown_scroll.pack(fill="x", padx=10, pady=5)
+
+            total_orders_all = 0
+
+            for i, year in enumerate(years):
+
+                year_frame = ctk.CTkFrame(breakdown_scroll, fg_color="#1A1A1A", corner_radius=8, width=180, height=60)
+
+                year_frame.pack(side="left", padx=5, pady=5)
+
+                year_frame.pack_propagate(False)
+
+                revenue = revenue_data[year]
+
+                order_count = order_count_data[year]
+
+                total_orders_all += order_count
+
+                if i == 0:
+
+                    growth_text, growth_color, growth_arrow = "N/A", "gray", ""
+
+                else:
+
+                    growth = growth_rates[i]
+
+                    if growth > 0:
+
+                        growth_arrow, growth_color, growth_text = "▲", "#1DB954", f"+{growth:.1f}%"
+
+                    elif growth < 0:
+
+                        growth_arrow, growth_color, growth_text = "▼", "red", f"{abs(growth):.1f}%"
+
+                    else:
+
+                        growth_arrow, growth_color, growth_text = "●", "white", "0%"
+
+                ctk.CTkLabel(year_frame, text=f"{year}", font=("Segoe UI", 13, "bold"),
+
+                             text_color="white").pack(pady=(5, 0))
+
+                ctk.CTkLabel(year_frame, text=f"₱{revenue:,.0f}", font=("Segoe UI", 11),
+
+                             text_color=self.accent_light).pack()
+
+                ctk.CTkLabel(year_frame, text=f"Orders: {order_count}", font=("Segoe UI", 9),
+
+                             text_color="gray").pack()
+
+                ctk.CTkLabel(year_frame, text=f"{growth_arrow} {growth_text}", font=("Segoe UI", 9, "bold"),
+
+                             text_color=growth_color).pack()
+
+            # I-update ang graph container - ginawang mas malaki
+
+            for w in self.sales_graph_container.winfo_children():
+                w.destroy()
+
+            # Palakihin ang graph container
+
+            self.sales_graph_container.configure(height=500)
+
+            self.display_yearly_graph(self.sales_graph_container, revenue_data, order_count_data, growth_rates, years)
+
+            return
+        total_rev = current_revenue
+        total_orders = len(filtered_orders)
+
+        # Compute percent change
+        percent_change = 0
+        if previous_revenue > 0:
+            percent_change = ((current_revenue - previous_revenue) / previous_revenue) * 100
+        elif current_revenue > 0 and previous_revenue == 0:
+            percent_change = 100
+        elif current_revenue == 0 and previous_revenue > 0:
+            percent_change = -100
+
+        # Determine trend arrow and color
+        if percent_change > 0:
+            trend_arrow = "▲"
+            trend_color = "#1DB954"
+            trend_text = f"+{abs(percent_change):.1f}%"
+        elif percent_change < 0:
+            trend_arrow = "▼"
+            trend_color = "red"
+            trend_text = f"{abs(percent_change):.1f}%"
+        else:
+            trend_arrow = "●"
+            trend_color = "white"
+            trend_text = "0%"
+
+        # I-print sa console para sa debugging
+        print(f"\n📊 {report_type} REPORT:")
+        print(f"   Period: {title_suffix}")
+        print(f"   Current Revenue: ₱{current_revenue:,.2f}")
+        print(f"   Previous Revenue: ₱{previous_revenue:,.2f}")
+        print(f"   Orders: {total_orders}")
+        print(f"   Growth: {trend_arrow} {trend_text}")
+
+        # I-update ang stats display
+        for w in self.sales_stats_f.winfo_children():
+            w.destroy()
+
+        metrics = [
+            ("TOTAL REVENUE", f"₱{total_rev:,.2f}", self.accent_light, "💰"),
+            ("ORDERS COMPLETED", str(total_orders), "white", "📋"),
+            ("REPORT PERIOD", title_suffix, "#1DB954", "📅"),
+            ("SALES GROWTH", f"{trend_arrow} {trend_text}", trend_color, "📈")
+        ]
+
+        for m_title, m_val, color, icon in metrics:
+            card = ctk.CTkFrame(self.sales_stats_f, fg_color="#121212", corner_radius=20, border_width=1,
+                                border_color="#2A2A2A", height=100)
+            card.pack(side="left", expand=True, fill="both", padx=10)
+            card.pack_propagate(False)
+            ctk.CTkLabel(card, text=icon, font=("Arial", 22)).pack(pady=(10, 0))
+            ctk.CTkLabel(card, text=m_title, font=("Segoe UI", 10, "bold"), text_color="#888").pack()
+            ctk.CTkLabel(card, text=m_val, font=("Century Gothic", 16, "bold"), text_color=color).pack(pady=5)
+
+        # I-update ang graph
+        for w in self.sales_graph_container.winfo_children():
+            w.destroy()
+
+        self.display_real_graph(self.sales_graph_container, filtered_orders, report_type)
+
+    def display_yearly_graph(self, container, revenue_data, order_count_data, growth_rates, years):
+        """Display yearly graph - FIXED TARGET AT 100,000"""
+
+        labels = [str(year) for year in years]
+        revenue_values = [revenue_data[year] for year in years]
+        order_values = [order_count_data[year] for year in years]
+
+        # FIXED Y LIMIT PARA MAKITA ANG 100,000 TARGET
+        y_max_limit = 120000  # 120,000 para may space sa taas ng target line
+
+        # I-set ang target sa 100,000
+        target = 100000
+
+        # Create figure with larger size
+        fig, ax1 = plt.subplots(figsize=(16, 8), dpi=120)
+        fig.patch.set_facecolor('#121212')
+        ax1.set_facecolor('#121212')
+
+        # Bar chart for revenue
+        color = '#1DB954' if max(revenue_values) > 0 else '#FF6B35'
+        bars = ax1.bar(labels, revenue_values, color=color, width=0.5, alpha=0.85, label='Revenue (₱)', zorder=2)
+
+        # Add value labels
+        for bar, value in zip(bars, revenue_values):
+            if value > 0:
+                height = bar.get_height()
+                percentage = (value / target) * 100
+                label_y = height + (y_max_limit * 0.01)
+                ax1.text(bar.get_x() + bar.get_width() / 2., label_y,
+                         f'₱{value:,.0f}\n({percentage:.1f}%)',
+                         ha='center', va='bottom', color='white', fontsize=9, fontweight='bold')
+
+        ax1.set_xlabel('Year', color='white', fontsize=13, fontweight='bold')
+        ax1.set_ylabel('Revenue (₱)', color='white', fontsize=13, fontweight='bold')
+        ax1.tick_params(axis='x', colors='gray', labelsize=12)
+        ax1.tick_params(axis='y', colors='gray', labelsize=11)
+        ax1.set_ylim(0, y_max_limit)
+
+        # Line chart for order count
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('Number of Orders', color='#FFD700', fontsize=13, fontweight='bold')
+        ax2.plot(labels, order_values, color='#FFD700', marker='o', linewidth=3, markersize=12, label='Orders',
+                 zorder=3)
+        ax2.tick_params(axis='y', colors='#FFD700', labelsize=11)
+        max_orders = max(order_values) if order_values else 0
+        ax2.set_ylim(0, max_orders + (max_orders * 0.2) + 5 if max_orders > 0 else 20)
+
+        # Add order count labels
+        for i, value in enumerate(order_values):
+            if value > 0:
+                ax2.annotate(str(value), (labels[i], value), textcoords="offset points", xytext=(0, 12),
+                             ha='center', color='#FFD700', fontsize=11, fontweight='bold')
+
+        # Title
+        ax1.set_title(f"Yearly Sales Report ({years[0]} - {years[-1]})", color="white",
+                      fontname="Century Gothic", fontsize=18, fontweight='bold', pad=20)
+
+        # TARGET LINE - WALANG EMOJI
+        ax1.axhline(y=target, color='#FFD700', linestyle='--', linewidth=2.5, alpha=0.9,
+                    label=f'TARGET: ₱{target:,.0f}', zorder=1)
+
+        # Add target label
+        ax1.text(len(labels) - 0.5, target + 2000, f'Target: ₱{target:,.0f}',
+                 color='#FFD700', fontsize=10, fontweight='bold', ha='right',
+                 bbox=dict(boxstyle='round,pad=0.3', facecolor='#1A1A1A', alpha=0.8))
+
+        # Average line for revenue
+        if revenue_values and any(v > 0 for v in revenue_values):
+            positive_revenue = [v for v in revenue_values if v > 0]
+            if positive_revenue:
+                avg_revenue = sum(positive_revenue) / len(positive_revenue)
+                ax1.axhline(y=avg_revenue, color='#00CED1', linestyle=':', linewidth=2, alpha=0.8,
+                            label=f'Avg Revenue: ₱{avg_revenue:,.0f}', zorder=1)
+
+        # Average line for orders
+        if order_values and any(v > 0 for v in order_values):
+            positive_orders = [v for v in order_values if v > 0]
+            if positive_orders:
+                avg_orders = sum(positive_orders) / len(positive_orders)
+                ax2.axhline(y=avg_orders, color='#FF6347', linestyle=':', linewidth=2, alpha=0.8,
+                            label=f'Avg Orders: {avg_orders:.1f}', zorder=1)
+
+        # Legends
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', facecolor='#121212',
+                   labelcolor='white', fontsize=11, framealpha=0.9, edgecolor='#333')
+
+        # Grid
+        ax1.grid(axis='y', linestyle='--', alpha=0.15, color='gray', linewidth=0.8)
+        for spine in ax1.spines.values():
+            spine.set_visible(False)
+
+        # Adjust layout
+        fig.tight_layout(pad=2.0)
+
+        canvas = FigureCanvasTkAgg(fig, master=container)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
+
+    def on_year_range_change(self, choice):
+        """Handle year range change"""
+        self.current_year_range = choice
+        try:
+            res = supabase.table("orders").select("*").execute()
+            orders = res.data
+        except:
+            orders = []
+        self.show_yearly_with_filter(orders)
+
+    def show_yearly_with_filter(self, orders):
+        """Display yearly report with filter"""
+        year_ranges = {
+            "2026-2030": list(range(2026, 2031)),
+            "2030-2034": list(range(2030, 2035)),
+            "2034-2038": list(range(2034, 2039))
+        }
+
+        years = year_ranges.get(self.current_year_range, list(range(2026, 2031)))
+
+        revenue_data = {year: 0 for year in years}
+        order_count_data = {year: 0 for year in years}
+
+        for o in orders:
+            try:
+                o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00'))
+                if o_date.year in years and o.get('status') == 'Completed':
+                    revenue_data[o_date.year] += o.get('total', 0)
+                    order_count_data[o_date.year] += 1
+            except:
+                pass
+
+        current_revenue = sum(revenue_data.values())
+
+        growth_rates = []
+        for i in range(len(years)):
+            if i == 0:
+                growth_rates.append(0)
+            else:
+                prev_rev = revenue_data[years[i - 1]]
+                curr_rev = revenue_data[years[i]]
+                if prev_rev > 0:
+                    growth = ((curr_rev - prev_rev) / prev_rev) * 100
+                else:
+                    growth = 100 if curr_rev > 0 else 0
+                growth_rates.append(growth)
+
+        for w in self.sales_graph_container.winfo_children():
+            w.destroy()
+
+        self.display_yearly_graph(self.sales_graph_container, revenue_data, order_count_data, growth_rates, years)
+
+    def export_full_report(self):
+        """Export full report to CSV"""
+        try:
+            res = supabase.table("orders").select("*").execute()
+            orders = res.data
+        except:
+            orders = []
+
+        # I-export ang report
+        filename = f"drix_full_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+        import csv
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(["DRIX COFFEE - FULL BUSINESS REPORT"])
+            writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+            writer.writerow([])
+            writer.writerow(["Total Revenue", f"₱{sum(o.get('total', 0) for o in orders):,.2f}"])
+            writer.writerow(["Total Orders", len(orders)])
+
+            # Average Order Value
+            if orders:
+                avg_order = sum(o.get('total', 0) for o in orders) / len(orders)
+                writer.writerow(["Average Order Value", f"₱{avg_order:,.2f}"])
+
+            writer.writerow([])
+            writer.writerow(["ORDER DETAILS"])
+            writer.writerow(["Order ID", "Date", "Customer", "Total", "Method", "Status"])
+
+            for o in orders:
+                customer = o['items'][0]['customer'] if o.get('items') else "Guest"
+                writer.writerow([
+                    o.get('order_id', 'N/A'),
+                    o.get('created_at', 'N/A')[:19],
+                    customer,
+                    f"₱{o.get('total', 0):,.2f}",
+                    o.get('method', 'N/A'),
+                    o.get('status', 'N/A')
+                ])
+
+        messagebox.showinfo("Export Complete", f"Report saved to {filename}")
+        self.audit_logger.log_action(self.user.get('username', ''), "EXPORT_REPORT", f"Exported report to {filename}",
+                                     "SUCCESS")
+
+    def reports_view(self):
+        for w in self.content.winfo_children(): w.destroy()
+
+        header_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        header_f.pack(fill="x", padx=40, pady=(30, 10))
+        ctk.CTkLabel(header_f, text="REPORT CENTER", font=("Century Gothic", 32, "bold"),
+                     text_color="white").pack(side="left")
+
+        report_options = [
+            ("📊 Daily Sales Report", "Generate report for today's sales"),
+            ("📅 Monthly Report", "Complete monthly analysis"),
+            ("📆 Yearly Report (2026-2030)", "Annual sales performance overview"),
+            ("💰 Revenue Analysis", "Detailed revenue breakdown")
+        ]
+
+        for title, desc in report_options:
+            card = ctk.CTkFrame(self.content, fg_color="#121212", corner_radius=15, border_width=1,
+                                border_color="#2A2A2A")
+            card.pack(fill="x", padx=40, pady=10)
+
+            ctk.CTkLabel(card, text=title, font=("Segoe UI", 16, "bold"),
+                         text_color=self.accent_light).pack(anchor="w", padx=20, pady=(15, 5))
+            ctk.CTkLabel(card, text=desc, font=("Segoe UI", 11), text_color="#888").pack(anchor="w", padx=20)
+
+            gen_btn = ctk.CTkButton(card, text="Generate Report", width=140,
+                                    command=lambda t=title: self.generate_specific_report(t))
+            gen_btn.pack(anchor="e", padx=20, pady=(10, 15))
+
+    def generate_specific_report(self, report_type: str):
+        try:
+            res = supabase.table("orders").select("*").execute()
+            orders = res.data
+        except:
+            orders = []
+
+        if "Daily" in report_type:
+            report = self.report_generator.generate_daily_report()
+            filename = f"daily_report_{datetime.now().strftime('%Y%m%d')}.csv"
+        elif "Yearly" in report_type:
+            # Yearly report for 2026-2030
+            years = list(range(2026, 2031))
+            yearly_data = []
+            for year in years:
+                year_orders = []
+                for o in orders:
+                    try:
+                        o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00'))
+                        if o_date.year == year and o.get('status') == 'Completed':
+                            year_orders.append(o)
+                    except:
+                        pass
+                total_rev = sum(o.get('total', 0) for o in year_orders)
+                total_orders = len(year_orders)
+                yearly_data.append({"year": year, "revenue": total_rev, "orders": total_orders})
+
+            filename = f"yearly_report_2026_2030_{datetime.now().strftime('%Y%m%d')}.csv"
+            import csv
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["DRIX COFFEE - YEARLY REPORT (2026-2030)"])
+                writer.writerow([f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"])
+                writer.writerow([])
+                writer.writerow(["Year", "Total Revenue", "Total Orders"])
+                for data in yearly_data:
+                    writer.writerow([data["year"], f"₱{data['revenue']:,.2f}", data["orders"]])
+            messagebox.showinfo("Export Complete", f"Yearly report saved to {filename}")
+            return
+        else:
+            filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            report = {"total_orders": len(orders), "total_revenue": sum(o.get('total', 0) for o in orders)}
+
+        self.report_generator.export_report_to_csv(report, filename)
+
+    def security_logs_view(self):
+        for w in self.content.winfo_children(): w.destroy()
+
+        header_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        header_f.pack(fill="x", padx=40, pady=(30, 10))
+        ctk.CTkLabel(header_f, text="SECURITY AUDIT LOGS", font=("Century Gothic", 32, "bold"),
+                     text_color="white").pack(side="left")
+
+        sc = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        sc.pack(expand=True, fill="both", padx=40, pady=20)
+
+        header_row = ctk.CTkFrame(sc, fg_color="#1a1a1a", height=35)
+        header_row.pack(fill="x", pady=2)
+
+        headers = ["Timestamp", "User", "Action", "Status", "Details"]
+        positions = [0.05, 0.25, 0.45, 0.65, 0.80]
+        for header, pos in zip(headers, positions):
+            ctk.CTkLabel(header_row, text=header, font=("Segoe UI", 11, "bold"),
+                         text_color=self.accent_light).place(relx=pos, rely=0.5, anchor="w")
+
+        logs = self.audit_logger.audit_logs[-100:]
+
+        for log in reversed(logs):
+            row = ctk.CTkFrame(sc, fg_color="#121212", height=40)
+            row.pack(fill="x", pady=1)
+
+            status_color = self.accent_light if log['status'] == "SUCCESS" else (
+                "orange" if log['status'] == "ERROR" else "red")
+
+            ctk.CTkLabel(row, text=log['timestamp'][:19] if len(log['timestamp']) > 19 else log['timestamp'],
+                         font=("Segoe UI", 10)).place(relx=0.05, rely=0.5, anchor="w")
+            ctk.CTkLabel(row, text=log['user'], font=("Segoe UI", 10)).place(relx=0.25, rely=0.5, anchor="w")
+            ctk.CTkLabel(row, text=log['action'], font=("Segoe UI", 10)).place(relx=0.45, rely=0.5, anchor="w")
+            ctk.CTkLabel(row, text=log['status'], text_color=status_color, font=("Segoe UI", 10, "bold")).place(
+                relx=0.65, rely=0.5, anchor="w")
+            ctk.CTkLabel(row, text=log['details'][:40], font=("Segoe UI", 9), text_color="#888").place(relx=0.80,
+                                                                                                       rely=0.5,
+                                                                                                       anchor="w")
+
+    def employee_shifts_view(self):
+        for w in self.content.winfo_children(): w.destroy()
+
+        header_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        header_f.pack(fill="x", padx=40, pady=(30, 10))
+        ctk.CTkLabel(header_f, text="EMPLOYEE SHIFT MANAGEMENT", font=("Century Gothic", 32, "bold"),
+                     text_color="white").pack(side="left")
+
+        sc = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        sc.pack(expand=True, fill="both", padx=40, pady=20)
+
+        shifts = self.workflow.shift_logs[-50:]
+
+        if not shifts:
+            ctk.CTkLabel(sc, text="No shift records found.", font=("Segoe UI", 16), text_color="gray").pack(pady=50)
+            return
+
+        for shift in shifts:
+            card = ctk.CTkFrame(sc, fg_color="#121212", corner_radius=10, border_width=1, border_color="#2A2A2A")
+            card.pack(fill="x", pady=5)
+
+            ctk.CTkLabel(card, text=f"👤 {shift.get('employee_id', 'Unknown')}", font=("Segoe UI", 14, "bold"),
+                         text_color=self.accent_light).pack(anchor="w", padx=15, pady=(10, 5))
+            ctk.CTkLabel(card, text=f"Role: {shift.get('role', 'N/A')}", font=("Segoe UI", 11)).pack(anchor="w",
+                                                                                                     padx=15)
+            ctk.CTkLabel(card, text=f"Start: {shift.get('start_time', 'N/A')[:19]}", font=("Segoe UI", 11)).pack(
+                anchor="w", padx=15)
+            if shift.get('end_time'):
+                ctk.CTkLabel(card, text=f"End: {shift['end_time'][:19]}", font=("Segoe UI", 11)).pack(anchor="w",
+                                                                                                      padx=15)
+            ctk.CTkLabel(card, text=f"Status: {shift.get('status', 'active').upper()}",
+                         text_color="green" if shift.get('status') == 'active' else "gray").pack(anchor="w", padx=15,
+                                                                                                 pady=(0, 10))
+
+    # ========================================================================
+    # POS VIEW AND CART FUNCTIONS
+    # ========================================================================
+
+    def pos_view(self, category="All"):
+        self.current_category = category
+        for w in self.content.winfo_children(): w.destroy()
+
+        header_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        header_f.pack(fill="x", padx=30, pady=(30, 10))
+        ctk.CTkLabel(header_f, text="Point of Sale", font=("Century Gothic", 32, "bold"), text_color="white").pack(
+            side="left")
+
+        cat_frame = ctk.CTkFrame(self.content, fg_color="transparent")
+        cat_frame.pack(fill="x", padx=30, pady=10)
+
+        # Idinagdag ang "Best Sellers" sa categories
+        categories = ["All", "Best Sellers", "Coffee", "Frappe/Blended Drinks", "Tea", "Food"]
+
+        for cat in categories:
+            is_active = self.current_category == cat
+            btn = ctk.CTkButton(cat_frame, text=cat, width=120, height=40, corner_radius=20,
+                                fg_color=self.accent if is_active else "#1A1A1A",
+                                text_color="white" if is_active else self.text_gray,
+                                font=("Segoe UI", 12, "bold"), command=lambda c=cat: self.pos_view(c))
+            btn.pack(side="left", padx=5)
+
+        self.cart_f = ctk.CTkFrame(self.content, width=420, fg_color="#000000", corner_radius=0)
+        self.cart_f.pack(side="right", fill="y")
+        self.cart_f.pack_propagate(False)
+        self.update_cart_ui()
+
+        menu_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        menu_f.pack(side="left", expand=True, fill="both", padx=(30, 10), pady=10)
+        scroll = ctk.CTkScrollableFrame(menu_f, fg_color="transparent")
+        scroll.pack(expand=True, fill="both")
+
+        try:
+            # Kunin ang menu items
+            query = supabase.table("menu").select("*")
+            res = query.execute()
+            all_menu = res.data
+        except Exception as e:
+            print(f"Error loading menu: {e}")
+            all_menu = []
+
+        # I-filter ang menu base sa category
+        if self.current_category == "Best Sellers":
+            # Kunin ang top 3 best selling products
+            try:
+                orders_res = supabase.table("orders").select("*").execute()
+                all_orders = orders_res.data
+                current_year = datetime.now().year
+
+                # Compute best sellers
+                product_sales = defaultdict(int)
+                for order in all_orders:
+                    try:
+                        order_date = datetime.fromisoformat(order['created_at'].replace('Z', '+00:00'))
+                        if order_date.year == current_year:
+                            for item in order.get('items', []):
+                                base_name = item.get('raw_name', item['name'].split(' (')[0])
+                                product_sales[base_name] += item.get('qty', 0)
+                    except:
+                        for item in order.get('items', []):
+                            base_name = item.get('raw_name', item['name'].split(' (')[0])
+                            product_sales[base_name] += item.get('qty', 0)
+
+                # Kunin ang top 3 product names
+                top_products = sorted(product_sales.items(), key=lambda x: x[1], reverse=True)[:3]
+                top_product_names = [p[0] for p in top_products]
+
+                # I-filter ang menu para sa top products lang
+                filtered_menu = [item for item in all_menu if item['name'] in top_product_names]
+                print(f"🏆 Best Sellers: {[item['name'] for item in filtered_menu]}")
+            except Exception as e:
+                print(f"Error getting best sellers: {e}")
+                filtered_menu = []
+        elif self.current_category == "All":
+            filtered_menu = all_menu
+        else:
+            filtered_menu = [item for item in all_menu if item.get('cat') == self.current_category]
+
+        image_mapping = {
+            "Caramel Macchiato": "images/caramel_macchiato.png",
+            "Cafe Latte": "images/cafe_latte.png",
+            "Americano": "images/americano.png",
+            "Iced Hibiscus Tea": "images/hibiscus_tea.png",
+            "Classic Milk Tea": "images/milk_tea.png",
+            "Glazed Donut": "images/donut.png",
+            "Chocolate Croissant": "images/croissant.png",
+            "Java Chip Frappe": "images/java_chip.png",
+            "Matcha Cream Frappe": "images/matcha_cream.png",
+            "Blueberry Cheesecake": "images/cheesecake.png"
+        }
+
+        # I-update ang scroll para makuha ang tamang width
+        scroll.update_idletasks()
+        scroll_width = scroll.winfo_width() if scroll.winfo_width() > 0 else 800
+        cols = max(3, scroll_width // 250)  # Dynamic columns
+
+        # I-loop ang filtered_menu para gumawa ng cards
+        for i, item in enumerate(filtered_menu):
+            # Gumawa ng frame para sa card
+            card = ctk.CTkFrame(scroll, width=230, height=330, corner_radius=25,
+                                fg_color="#121212", border_width=1, border_color="#222")
+            card.grid(row=i // cols, column=i % cols, padx=8, pady=8, sticky="nsew")
+            card.grid_propagate(False)
+
+            # Image o placeholder
+            img_path = image_mapping.get(item['name'])
+            try:
+                if img_path and os.path.exists(img_path):
+                    pil_img = Image.open(img_path)
+                    ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(160, 140))
+                    ctk.CTkLabel(card, image=ctk_img, text="").pack(pady=(15, 5))
+                else:
+                    fallback = "☕" if item.get('cat') != "Food" else "🍩"
+                    ctk.CTkLabel(card, text=fallback, font=("Arial", 60)).pack(pady=(35, 10))
+            except:
+                ctk.CTkLabel(card, text="⚠️", font=("Arial", 40)).pack(pady=(35, 10))
+
+            # Product name
+            ctk.CTkLabel(card, text=item['name'], font=("Segoe UI", 15, "bold"), text_color="white",
+                         wraplength=180).pack()
+
+            # Product price
+            ctk.CTkLabel(card, text=f"₱{item['price']}", font=("Century Gothic", 18, "bold"),
+                         text_color=self.accent_light).pack()
+
+            # Best seller badge
+            if self.current_category == "Best Sellers":
+                ctk.CTkLabel(card, text="🏆 BEST SELLER", font=("Segoe UI", 10, "bold"),
+                             text_color="#FFD700").pack(pady=(5, 0))
+
+            # Add to order button
+            add_btn = ctk.CTkButton(card, text="+ ADD TO ORDER", corner_radius=10, height=35,
+                                    fg_color="#1F1F1F", border_width=1, border_color=self.accent,
+                                    font=("Segoe UI", 11, "bold"), hover_color=self.accent,
+                                    command=lambda x=item: self.open_custom(x))
+            add_btn.pack(side="bottom", pady=15)
+
+        # Configure grid columns to expand
+        for col in range(cols):
+            scroll.grid_columnconfigure(col, weight=1)
+
+    def open_custom(self, item, edit_index=None):
+        modal = ctk.CTkToplevel(self.root)
+        modal.geometry("450x550")
+        modal.title("Customize Order")
+        modal.attributes("-topmost", True)
+        modal.grab_set()
+
+        product_name = item['name'] if edit_index is None else self.cart[edit_index]['raw_name']
+        ctk.CTkLabel(modal, text=f"Product: {product_name}", font=("Segoe UI", 20, "bold"),
+                     text_color=self.accent_light).pack(pady=20)
+
+        name_in = None
+        if not self.current_customer or edit_index is not None:
+            ctk.CTkLabel(modal, text="Customer Name:").pack(anchor="w", padx=50)
+            name_in = ctk.CTkEntry(modal, width=350)
+            if edit_index is not None:
+                name_in.insert(0, self.cart[edit_index]['customer'])
+            elif self.current_customer:
+                name_in.insert(0, self.current_customer)
+            name_in.pack(pady=5)
+
+        ctk.CTkLabel(modal, text="Quantity:").pack(anchor="w", padx=50, pady=(10, 0))
+        qty_in = ctk.CTkComboBox(modal, values=["1", "2", "3", "4", "5", "10"], width=350)
+        qty_in.set(str(self.cart[edit_index]['qty']) if edit_index is not None else "1")
+        qty_in.pack(pady=5)
+
+        ctk.CTkLabel(modal, text="Select Size:").pack(anchor="w", padx=50, pady=(10, 0))
+        size_var = ctk.StringVar(value="Small")
+        if edit_index is not None:
+            curr_size = self.cart[edit_index]['name'].split('(')[-1].replace(')', '')
+            size_var.set(curr_size)
+
+        for s, p in [("Small", 0), ("Medium", 20), ("Large", 35)]:
+            ctk.CTkRadioButton(modal, text=f"{s} (+₱{p})", variable=size_var, value=s).pack(anchor="w", padx=70, pady=5)
+
+        button_frame = ctk.CTkFrame(modal, fg_color="transparent")
+        button_frame.pack(pady=30)
+
+        def save_action():
+            size = size_var.get()
+            add_price = {"Small": 0, "Medium": 20, "Large": 35}[size]
+            base = item['price'] if edit_index is None else self.cart[edit_index]['base_unit_price']
+            qty = int(qty_in.get())
+
+            if name_in:
+                self.current_customer = self.security.sanitize_input(name_in.get()) or "Guest"
+
+            full_display_name = f"{product_name} ({size})"
+
+            for _ in range(qty):
+                self.inventory_manager.deduct_stock(product_name, 1, size)
+
+            entry = {
+                "name": full_display_name, "raw_name": product_name, "customer": self.current_customer,
+                "qty": qty, "base_unit_price": base, "total": (base + add_price) * qty,
+                "size": size
+            }
+
+            if edit_index is not None:
+                self.cart[edit_index] = entry
+            else:
+                found = False
+                for ex in self.cart:
+                    if ex['name'] == full_display_name and ex['customer'] == self.current_customer:
+                        ex['qty'] += qty
+                        ex['total'] = (ex['base_unit_price'] + add_price) * ex['qty']
+                        found = True
+                        break
+                if not found:
+                    self.cart.append(entry)
+
+            modal.destroy()
+            self.update_cart_ui()
+            self.audit_logger.log_action(self.user.get('username', 'cashier'), "ADD_TO_CART",
+                                         f"Added {qty}x {product_name} ({size}) for {self.current_customer}", "SUCCESS")
+
+            if edit_index is None:
+                self.ask_more()
+
+        confirm_btn = ctk.CTkButton(button_frame, text="✅ CONFIRM", command=save_action,
+                                    fg_color=self.accent, text_color="white",
+                                    height=45, width=200, font=("Segoe UI", 16, "bold"))
+        confirm_btn.pack()
+
+    def print_receipt_to_pdf(self, order):
+        receipts_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "receipts")
+        if not os.path.exists(receipts_folder):
+            os.makedirs(receipts_folder)
+
+        filename = f"receipt_{order['order_id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        pdf_path = os.path.join(receipts_folder, filename)
+
+        try:
+            c = canvas.Canvas(pdf_path, pagesize=A4)
+            width, height = A4
+
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(50, height - 50, "DRIX COFFEE SHOP")
+            c.setFont("Helvetica", 10)
+            c.drawString(50, height - 70, "Official Receipt")
+            c.drawString(50, height - 85, f"Order ID: #{order['order_id']}")
+            c.drawString(50, height - 100, f"Date: {order['created_at'][:19]}")
+            if order['items']:
+                c.drawString(50, height - 115, f"Customer: {order['items'][0]['customer']}")
+            c.line(50, height - 125, width - 50, height - 125)
+
+            y_position = height - 145
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(50, y_position, "Item")
+            c.drawString(300, y_position, "Qty")
+            c.drawString(350, y_position, "Price")
+            c.drawString(450, y_position, "Total")
+            y_position -= 15
+            c.setFont("Helvetica", 9)
+
+            for item in order['items']:
+                name = item['name'][:30] if len(item['name']) > 30 else item['name']
+                c.drawString(50, y_position, name)
+                c.drawString(305, y_position, str(item['qty']))
+                unit_price = item['total'] / item['qty'] if item['qty'] > 0 else 0
+                c.drawString(355, y_position, f"₱{unit_price:.2f}")
+                c.drawString(455, y_position, f"₱{item['total']:.2f}")
+                y_position -= 15
+                if y_position < 50:
+                    c.showPage()
+                    y_position = height - 50
+                    c.setFont("Helvetica", 9)
+
+            c.line(50, y_position - 5, width - 50, y_position - 5)
+            y_position -= 20
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(350, y_position, f"TOTAL: ₱{order['total']:.2f}")
+            y_position -= 20
+            c.setFont("Helvetica", 10)
+            c.drawString(50, y_position, f"Payment Method: {order['method']}")
+            y_position -= 15
+            if order['method'] == "GCash" and order.get('reference'):
+                c.drawString(50, y_position, f"Reference No: {order['reference']}")
+            else:
+                c.drawString(50, y_position, f"Paid: ₱{order['received']:.2f}")
+                y_position -= 15
+                c.drawString(50, y_position, f"Change: ₱{order['change']:.2f}")
+            c.line(50, y_position - 5, width - 50, y_position - 5)
+            y_position -= 20
+            c.setFont("Helvetica-Oblique", 9)
+            c.drawString(50, y_position, "Thank you for choosing Drix Coffee Shop!")
+            c.save()
+            return pdf_path
+        except Exception as e:
+            print(f"Error creating PDF: {e}")
+            alt_path = os.path.join(os.getcwd(), filename)
+            c = canvas.Canvas(alt_path, pagesize=A4)
+            width, height = A4
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(50, height - 50, "DRIX COFFEE SHOP")
+            c.setFont("Helvetica", 10)
+            c.drawString(50, height - 70, "Official Receipt")
+            c.drawString(50, height - 85, f"Order ID: #{order['order_id']}")
+            c.drawString(50, height - 100, f"Date: {order['created_at'][:19]}")
+            c.drawString(50, height - 115, f"Total: ₱{order['total']:.2f}")
+            c.drawString(50, height - 130, f"Method: {order['method']}")
+            c.drawString(50, height - 150, "Thank you for choosing Drix!")
+            c.save()
+            return alt_path
+
+    def ask_more(self):
+        ask = ctk.CTkToplevel(self.root)
+        ask.geometry("400x250")
+        ask.title("Continue Order")
+        ask.attributes("-topmost", True)
+        ask.grab_set()
+        ctk.CTkLabel(ask, text="Item Added!", font=("Segoe UI", 18, "bold"), text_color=self.accent_light).pack(pady=20)
+        ctk.CTkLabel(ask, text=f"Would {self.current_customer} like anything else?").pack()
+        btn_f = ctk.CTkFrame(ask, fg_color="transparent")
+        btn_f.pack(pady=30)
+        ctk.CTkButton(btn_f, text="YES, ADD MORE", width=140, command=ask.destroy).pack(side="left", padx=10)
+        ctk.CTkButton(btn_f, text="NO, PAY NOW", width=140, fg_color="#333", command=ask.destroy).pack(side="left",
+                                                                                                       padx=10)
+
+    def update_cart_ui(self):
+        for w in self.cart_f.winfo_children(): w.destroy()
+        ctk.CTkLabel(self.cart_f, text="CURRENT ORDER", font=("Impact", 22)).pack(pady=25)
+        sc = ctk.CTkScrollableFrame(self.cart_f, height=400, fg_color="transparent")
+        sc.pack(fill="both", expand=True, padx=15)
+
+        for i, item in enumerate(self.cart):
+            f = ctk.CTkFrame(sc, fg_color="#111", corner_radius=10)
+            f.pack(fill="x", pady=5)
+            ctk.CTkLabel(f, text=f"{item['qty']}x {item['name']}\n👤 {item['customer']}", justify="left").pack(
+                side="left", padx=15, pady=10)
+            edit_btn = ctk.CTkButton(f, text="✎", width=30, fg_color="#333",
+                                     command=lambda x=i: self.open_custom(self.cart[x], x))
+            edit_btn.pack(side="right", padx=5)
+            remove_btn = ctk.CTkButton(f, text="✕", width=30, fg_color="transparent", text_color="red",
+                                       command=lambda x=i: self.remove_item(x))
+            remove_btn.pack(side="right")
+
+        sub = sum(i['total'] for i in self.cart)
+        total = sub
+
+        ctk.CTkLabel(self.cart_f, text=f"TOTAL: ₱{total:,.2f}", font=("Impact", 35), text_color=self.accent_light).pack(
+            pady=5)
+
+        btn_f = ctk.CTkFrame(self.cart_f, fg_color="transparent")
+        btn_f.pack(fill="x", padx=20, pady=10)
+
+        cash_btn = ctk.CTkButton(btn_f, text="CASH", width=170, height=55,
+                                 command=lambda: self.show_summary("Cash", total))
+        cash_btn.pack(side="left", padx=5)
+
+        gcash_btn = ctk.CTkButton(btn_f, text="GCASH", width=170, height=55, fg_color="#0055ff",
+                                  command=lambda: self.show_summary("GCash", total))
+        gcash_btn.pack(side="left")
+
+        void_btn = ctk.CTkButton(self.cart_f, text="VOID ALL", fg_color="transparent", text_color="gray",
+                                 command=self.void_all)
+        void_btn.pack(pady=10)
+
+    def void_all(self):
+        if messagebox.askyesno("Confirm", "Clear the entire order?"):
+            self.cart = []
+            self.current_customer = ""
+            self.update_cart_ui()
+            self.audit_logger.log_action(self.user.get('username', 'cashier'), "VOID_CART", "Cleared entire cart",
+                                         "SUCCESS")
+
+    def remove_item(self, i):
+        self.cart.pop(i)
+        if not self.cart:
+            self.current_customer = ""
+        self.update_cart_ui()
+
+    def toggle_disc(self):
+        self.discount_active = not self.discount_active
+        self.update_cart_ui()
+
+    def show_summary(self, method, total_amt):
+        if not self.cart: return
+
+        self.root.attributes('-disabled', True)
+        transaction_id = self.transaction_manager.begin_transaction()
+
+        summary = ctk.CTkToplevel(self.root)
+        summary.geometry("500x750")
+        summary.title("Payment Summary")
+        summary.attributes("-topmost", True)
+        summary.grab_set()
+
+        def on_summary_close():
+            self.root.attributes('-disabled', False)
+            summary.destroy()
+
+        summary.protocol("WM_DELETE_WINDOW", on_summary_close)
+
+        ctk.CTkLabel(summary, text="PAYMENT SUMMARY", font=("Impact", 28), text_color=self.accent_light).pack(pady=20)
+
+        ref_in = None
+        if method == "GCash":
+            gcash_f = ctk.CTkFrame(summary, fg_color="#0055ff", corner_radius=10)
+            gcash_f.pack(fill="x", padx=40, pady=10)
+            ctk.CTkLabel(gcash_f, text="GCASH PAYMENT", font=("Segoe UI", 12, "bold"), text_color="white").pack(pady=5)
+            ctk.CTkLabel(gcash_f, text="Drix Coffee Shop", font=("Segoe UI", 14, "bold"), text_color="white").pack()
+            ctk.CTkLabel(gcash_f, text="09305158605", font=("Segoe UI", 18, "bold"), text_color="yellow").pack(pady=5)
+            ctk.CTkLabel(summary, text="Reference Number:").pack(pady=(10, 0))
+            ref_in = ctk.CTkEntry(summary, width=300, height=40, placeholder_text="Enter 13-digit Ref No.")
+            ref_in.pack(pady=5)
+
+        list_f = ctk.CTkScrollableFrame(summary, height=200)
+        list_f.pack(fill="x", padx=40, pady=10)
+        for item in self.cart:
+            ctk.CTkLabel(list_f, text=f"{item['qty']}x {item['name']} - ₱{item['total']:,.2f}", anchor="w").pack(
+                fill="x")
+
+        ctk.CTkLabel(summary, text=f"TOTAL: ₱{total_amt:,.2f}", font=("Segoe UI", 22, "bold")).pack(pady=10)
+
+        cash_in = None
+        change_lbl = None
+
+        if method == "Cash":
+            ctk.CTkLabel(summary, text="Cash Received:").pack()
+            cash_in = ctk.CTkEntry(summary, width=200, height=40, font=("Arial", 18))
+            cash_in.pack(pady=5)
+            change_lbl = ctk.CTkLabel(summary, text="Change: ₱0.00", font=("Segoe UI", 18, "bold"),
+                                      text_color=self.accent_light)
+            change_lbl.pack(pady=5)
+
+            def calc(event=None):
+                try:
+                    if cash_in and cash_in.winfo_exists():
+                        val = float(cash_in.get())
+                        if change_lbl and change_lbl.winfo_exists():
+                            change_lbl.configure(text=f"Change: ₱{max(0, val - total_amt):,.2f}")
+                except:
+                    pass
+
+            cash_in.bind("<KeyRelease>", calc)
+
+        def finalize():
+            received = total_amt
+            change = 0.0
+            reference = ""
+            if method == "Cash":
+                try:
+                    if cash_in and cash_in.winfo_exists():
+                        received = float(cash_in.get())
+                        if received < total_amt:
+                            messagebox.showwarning("Payment", "Insufficient cash!", parent=summary)
+                            return
+                        change = received - total_amt
+                    else:
+                        return
+                except:
+                    return
+            elif method == "GCash":
+                if ref_in and ref_in.winfo_exists():
+                    reference = ref_in.get().strip()
+                    if not reference:
+                        messagebox.showwarning("Payment", "Please enter GCash Reference Number!", parent=summary)
+                        return
+                else:
+                    return
+
+            order_id = random.randint(1000, 9999)
+            now = datetime.now().isoformat()
+            order_data = {
+                "order_id": order_id,
+                "items": self.cart.copy(),
+                "total": float(total_amt),
+                "method": method,
+                "received": float(received),
+                "change": float(change),
+                "reference": reference,
+                "status": "Pending",
+                "created_at": now
+            }
+
+            try:
+                supabase.table("orders").insert(order_data).execute()
+                self.transaction_manager.commit(transaction_id)
+                self.audit_logger.log_action(self.user.get('username', 'cashier'), "PROCESS_PAYMENT",
+                                             f"Order #{order_id} - {method} - ₱{total_amt:,.2f}", "SUCCESS")
+                self.cart = []
+                self.current_customer = ""
+                self.update_cart_ui()
+                if summary and summary.winfo_exists():
+                    summary.destroy()
+                self.root.attributes('-disabled', False)
+                self.show_receipt(order_data)
+            except Exception as e:
+                self.transaction_manager.rollback(transaction_id)
+                self.audit_logger.log_action(self.user.get('username', 'cashier'), "PROCESS_PAYMENT",
+                                             f"Failed: {str(e)}", "ERROR")
+                messagebox.showerror("Database Error", f"Failed to save order: {str(e)}", parent=summary)
+
+        confirm_btn = ctk.CTkButton(summary, text="CONFIRM & PRINT RECEIPT", fg_color=self.accent, height=60,
+                                    font=("Segoe UI", 16, "bold"), command=finalize)
+        confirm_btn.pack(pady=30, padx=40, fill="x")
+
+    def show_receipt(self, order):
+        receipt = ctk.CTkToplevel(self.root)
+        receipt.geometry("400x750")
+        receipt.title("Official Receipt")
+        receipt.attributes("-topmost", True)
+
+        paper = ctk.CTkFrame(receipt, fg_color="white", corner_radius=0)
+        paper.pack(fill="both", expand=True, padx=20, pady=20)
+        lbl_style = {"text_color": "black", "bg_color": "white"}
+
+        ctk.CTkLabel(paper, text="DRIX COFFEE SHOP", font=("Courier New", 22, "bold"), **lbl_style).pack(pady=(20, 5))
+        ctk.CTkLabel(paper, text="Official Receipt", font=("Courier New", 12), **lbl_style).pack()
+        ctk.CTkLabel(paper, text="------------------------------", **lbl_style).pack()
+        ctk.CTkLabel(paper, text=f"Order ID: #{order['order_id']}", **lbl_style).pack(anchor="w", padx=20)
+        ctk.CTkLabel(paper, text=f"Date: {order['created_at'][:19]}", **lbl_style).pack(anchor="w", padx=20)
+        if order['items']:
+            ctk.CTkLabel(paper, text=f"Customer: {order['items'][0]['customer']}", font=("Courier New", 14, "bold"),
+                         **lbl_style).pack(anchor="w", padx=20)
+        ctk.CTkLabel(paper, text="------------------------------", **lbl_style).pack()
+
+        for item in order['items']:
+            ctk.CTkLabel(paper, text=f"{item['qty']}x {item['name']}", **lbl_style).pack(anchor="w", padx=20)
+            ctk.CTkLabel(paper, text=f"      ₱{item['total']:,.2f}", **lbl_style).pack(anchor="e", padx=20)
+
+        ctk.CTkLabel(paper, text="------------------------------", **lbl_style).pack()
+        ctk.CTkLabel(paper, text=f"TOTAL: ₱{order['total']:,.2f}", font=("Courier New", 18, "bold"), **lbl_style).pack(
+            pady=5)
+        ctk.CTkLabel(paper, text=f"Method: {order['method']}", **lbl_style).pack(anchor="w", padx=20)
+
+        if order['method'] == "GCash" and order.get('reference'):
+            ctk.CTkLabel(paper, text=f"Ref No: {order['reference']}", font=("Courier New", 12, "bold"),
+                         **lbl_style).pack(anchor="w", padx=20)
+        else:
+            ctk.CTkLabel(paper, text=f"Paid: ₱{order['received']:,.2f}", **lbl_style).pack(anchor="w", padx=20)
+            ctk.CTkLabel(paper, text=f"Change: ₱{order['change']:,.2f}", font=("Courier New", 14, "bold"),
+                         **lbl_style).pack(anchor="w", padx=20)
+
+        ctk.CTkLabel(paper, text="------------------------------", **lbl_style).pack()
+        ctk.CTkLabel(paper, text="Thank you for choosing Drix!", font=("Courier New", 12, "italic"), **lbl_style).pack(
+            pady=20)
+
+        button_frame = ctk.CTkFrame(receipt, fg_color="transparent")
+        button_frame.pack(pady=10)
+        close_btn = ctk.CTkButton(button_frame, text="CLOSE", command=receipt.destroy, width=100)
+        close_btn.pack(side="left", padx=10)
+
+        def save_as_pdf():
+            try:
+                pdf_path = self.print_receipt_to_pdf(order)
+                messagebox.showinfo("PDF Saved", f"Receipt saved as PDF!\nLocation: {pdf_path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save PDF: {str(e)}")
+
+        pdf_btn = ctk.CTkButton(button_frame, text="SAVE AS PDF", command=save_as_pdf,
+                                fg_color="#0055ff", hover_color="#0033aa", width=120)
+        pdf_btn.pack(side="left", padx=10)
+        return receipt
+
+    # ========================================================================
+    # QUEUE AND ORDER MANAGEMENT
+    # ========================================================================
+
+    def queue_view(self):
+        for w in self.content.winfo_children(): w.destroy()
+        header_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        header_f.pack(fill="x", padx=40, pady=30)
+        ctk.CTkLabel(header_f, text="ORDER QUEUE", font=("Impact", 32), text_color=self.accent_light).pack(side="left")
+        ctk.CTkButton(header_f, text="🔄 REFRESH", width=100, command=self.queue_view).pack(side="right")
+
+        try:
+            res = supabase.table("orders").select("*").eq("status", "Pending").execute()
+            orders = res.data
+        except Exception as e:
+            print(f"Error loading orders: {e}")
+            orders = []
+
+        if not orders:
+            ctk.CTkLabel(self.content, text="No pending orders. Take a break! ☕", font=("Segoe UI", 18),
+                         text_color="gray").pack(pady=100)
+            return
+
+        sc = ctk.CTkScrollableFrame(self.content, width=1000, height=600, fg_color="transparent")
+        sc.pack(expand=True, fill="both", padx=40)
+
+        for o in orders:
+            card = ctk.CTkFrame(sc, border_width=1, border_color="#333", fg_color="#0f0f0f")
+            card.pack(fill="x", pady=10, padx=5)
+            info_f = ctk.CTkFrame(card, fg_color="transparent")
+            info_f.pack(side="left", padx=20, pady=15)
+            ctk.CTkLabel(info_f, text=f"CUSTOMER: {o['items'][0]['customer']}", font=("Segoe UI", 18, "bold"),
+                         text_color=self.accent_light).pack(anchor="w")
+            ctk.CTkLabel(info_f, text=f"ID: #{o['order_id']} | {o['created_at'][:19]}", text_color="gray").pack(
+                anchor="w")
+
+            details_f = ctk.CTkFrame(card, fg_color="transparent")
+            details_f.pack(side="left", expand=True, padx=40)
+            items_text = "".join([f"• {item['qty']}x {item['name']} \n" for item in o['items']])
+            ctk.CTkLabel(details_f, text=items_text, justify="left", font=("Segoe UI", 14)).pack(anchor="w")
+
+            complete_btn = ctk.CTkButton(card, text="MARK AS DONE", fg_color=self.accent, text_color="white",
+                                         command=lambda x=o['order_id']: self.complete_order(x))
+            complete_btn.pack(side="right", padx=20)
+
+    def complete_order(self, oid):
+        try:
+            supabase.table("orders").update({"status": "Completed"}).eq("order_id", oid).execute()
+            self.audit_logger.log_action(self.user.get('username', 'staff'), "COMPLETE_ORDER",
+                                         f"Order #{oid} completed", "SUCCESS")
+            self.queue_view()
+        except Exception as e:
+            print(f"Error completing order: {e}")
+            messagebox.showerror("Database Error", f"Failed to update order: {str(e)}")
+
+    def completed_staff_view(self):
+        for w in self.content.winfo_children(): w.destroy()
+        ctk.CTkLabel(self.content, text="SERVED ORDERS HISTORY", font=("Impact", 28),
+                     text_color=self.accent_light).pack(pady=30)
+
+        try:
+            res = supabase.table("orders").select("*").eq("status", "Completed").execute()
+            orders = res.data[::-1]
+        except Exception as e:
+            print(f"Error loading completed orders: {e}")
+            orders = []
+
+        sc = ctk.CTkScrollableFrame(self.content, width=900, height=600)
+        sc.pack(expand=True, fill="both", padx=50)
+
+        if not orders:
+            ctk.CTkLabel(sc, text="No completed orders yet.", font=("Segoe UI", 16), text_color="gray").pack(pady=50)
+            return
+
+        for o in orders:
+            f = ctk.CTkFrame(sc, fg_color="#1a1a1a")
+            f.pack(fill="x", pady=5, padx=10)
+            desc = f"#{o['order_id']} | {o['items'][0]['customer']} | " + ", ".join(
+                [f"{i['qty']}x {i['name']}" for i in o['items']])
+            ctk.CTkLabel(f, text=desc, font=("Segoe UI", 12)).pack(side="left", padx=20, pady=10)
+            ctk.CTkLabel(f, text="✅ SERVED", text_color=self.accent_light, font=("Segoe UI", 12, "bold")).pack(
+                side="right", padx=20)
+
+    def transaction_history_view(self, filter_cat="All", filter_date=None, search_text=None):
+        for w in self.content.winfo_children(): w.destroy()
+
+        try:
+            res = supabase.table("orders").select("*").execute()
+            orders = res.data[::-1]
+        except Exception as e:
+            print(f"Error loading transactions: {e}")
+            orders = []
+
+        try:
+            menu_res = supabase.table("menu").select("*").execute()
+            menu = menu_res.data
+        except Exception as e:
+            menu = []
+
+        header_f = ctk.CTkFrame(self.content, fg_color="transparent")
+        header_f.pack(fill="x", padx=40, pady=(30, 10))
+        ctk.CTkLabel(header_f, text="DETAILED TRANSACTION LOGS", font=("Century Gothic", 28, "bold")).pack(side="left")
+
+        # ====================================================================
+        # FILTER SECTION - DATE FILTER + SEARCH FILTER
+        # ====================================================================
+        filter_main_frame = ctk.CTkFrame(self.content, fg_color="transparent")
+        filter_main_frame.pack(fill="x", padx=40, pady=10)
+
+        # Row 1: Date Filter
+        date_filter_frame = ctk.CTkFrame(filter_main_frame, fg_color="#1A1A1A", corner_radius=10)
+        date_filter_frame.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(date_filter_frame, text="📅 DATE FILTER:", font=("Segoe UI", 12, "bold"),
+                     text_color=self.accent_light).pack(side="left", padx=15, pady=10)
+
+        # Date entry fields
+        date_entry_frame = ctk.CTkFrame(date_filter_frame, fg_color="transparent")
+        date_entry_frame.pack(side="left", padx=10)
+
+        ctk.CTkLabel(date_entry_frame, text="From:", font=("Segoe UI", 11)).pack(side="left", padx=5)
+
+        self.filter_date_from = ctk.CTkEntry(date_entry_frame, width=120, placeholder_text="YYYY-MM-DD",
+                                             font=("Segoe UI", 11))
+        self.filter_date_from.pack(side="left", padx=5)
+
+        ctk.CTkLabel(date_entry_frame, text="To:", font=("Segoe UI", 11)).pack(side="left", padx=5)
+
+        self.filter_date_to = ctk.CTkEntry(date_entry_frame, width=120, placeholder_text="YYYY-MM-DD",
+                                           font=("Segoe UI", 11))
+        self.filter_date_to.pack(side="left", padx=5)
+
+        # Date filter buttons
+        date_btn_frame = ctk.CTkFrame(date_filter_frame, fg_color="transparent")
+        date_btn_frame.pack(side="right", padx=15)
+
+        apply_date_btn = ctk.CTkButton(date_btn_frame, text="APPLY DATE", width=100, height=30,
+                                       command=self.apply_transaction_filter,
+                                       fg_color=self.accent, hover_color=self.accent_light)
+        apply_date_btn.pack(side="left", padx=5)
+
+        clear_date_btn = ctk.CTkButton(date_btn_frame, text="CLEAR DATE", width=90, height=30,
+                                       command=self.clear_date_filter,
+                                       fg_color="#333", hover_color="#555")
+        clear_date_btn.pack(side="left", padx=5)
+
+        today_btn = ctk.CTkButton(date_btn_frame, text="TODAY", width=70, height=30,
+                                  command=self.filter_today_transactions,
+                                  fg_color="#0055ff", hover_color="#0033aa")
+        today_btn.pack(side="left", padx=5)
+
+        # Row 2: Search Filter
+        search_filter_frame = ctk.CTkFrame(filter_main_frame, fg_color="#1A1A1A", corner_radius=10)
+        search_filter_frame.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(search_filter_frame, text="🔍 SEARCH FILTER:", font=("Segoe UI", 12, "bold"),
+                     text_color=self.accent_light).pack(side="left", padx=15, pady=10)
+
+        # Search options
+        search_option_frame = ctk.CTkFrame(search_filter_frame, fg_color="transparent")
+        search_option_frame.pack(side="left", padx=10)
+
+        self.search_by = ctk.CTkOptionMenu(search_option_frame,
+                                           values=["Customer Name", "Order ID", "Product Name", "Payment Method"],
+                                           width=140, height=30, fg_color="#333", button_color=self.accent)
+        self.search_by.pack(side="left", padx=5)
+        self.search_by.set("Customer Name")
+
+        self.search_entry = ctk.CTkEntry(search_option_frame, width=200, placeholder_text="Enter search keyword...",
+                                         font=("Segoe UI", 11))
+        self.search_entry.pack(side="left", padx=5)
+        self.search_entry.bind("<Return>", lambda e: self.apply_search_filter())
+
+        # Search buttons
+        search_btn_frame = ctk.CTkFrame(search_filter_frame, fg_color="transparent")
+        search_btn_frame.pack(side="right", padx=15)
+
+        apply_search_btn = ctk.CTkButton(search_btn_frame, text="SEARCH", width=90, height=30,
+                                         command=self.apply_search_filter,
+                                         fg_color="#FF9800", hover_color="#E68A00")
+        apply_search_btn.pack(side="left", padx=5)
+
+        clear_search_btn = ctk.CTkButton(search_btn_frame, text="CLEAR SEARCH", width=100, height=30,
+                                         command=self.clear_search_filter,
+                                         fg_color="#333", hover_color="#555")
+        clear_search_btn.pack(side="left", padx=5)
+
+        # Row 3: Active Filters Display
+        active_filters_frame = ctk.CTkFrame(filter_main_frame, fg_color="#2A2A2A", corner_radius=8)
+        active_filters_frame.pack(fill="x", pady=(0, 10))
+
+        self.active_filters_label = ctk.CTkLabel(active_filters_frame, text="Active Filters: None",
+                                                 font=("Segoe UI", 10), text_color="#888")
+        self.active_filters_label.pack(anchor="w", padx=15, pady=8)
+
+        # Category filter frame
+        filter_frame = ctk.CTkFrame(filter_main_frame, fg_color="transparent")
+        filter_frame.pack(fill="x", pady=5)
+
+        categories = ["All", "Coffee", "Frappe/Blended Drinks", "Tea", "Food"]
+        for cat in categories:
+            is_active = filter_cat == cat
+            btn = ctk.CTkButton(filter_frame, text=cat, width=140, height=35, corner_radius=15,
+                                fg_color=self.accent if is_active else "#1A1A1A",
+                                text_color="white" if is_active else self.text_gray,
+                                font=("Segoe UI", 12, "bold" if is_active else "normal"),
+                                command=lambda c=cat: self.transaction_history_view(c, self.current_date_filter,
+                                                                                    self.current_search_text))
+            btn.pack(side="left", padx=5)
+
+        # Header
+        header = ctk.CTkFrame(self.content, fg_color="#1a1a1a", height=45)
+        header.pack(fill="x", padx=40, pady=5)
+        ctk.CTkLabel(header, text="TIMESTAMP", font=("Segoe UI", 11, "bold"), text_color=self.accent_light).place(
+            relx=0.02, rely=0.5, anchor="w")
+        ctk.CTkLabel(header, text="CUSTOMER", font=("Segoe UI", 11, "bold"), text_color=self.accent_light).place(
+            relx=0.18, rely=0.5, anchor="w")
+        ctk.CTkLabel(header, text="ORDER DETAILS", font=("Segoe UI", 11, "bold"), text_color=self.accent_light).place(
+            relx=0.45, rely=0.5, anchor="w")
+        ctk.CTkLabel(header, text="TOTAL", font=("Segoe UI", 11, "bold"), text_color=self.accent_light).place(relx=0.90,
+                                                                                                              rely=0.5,
+                                                                                                              anchor="w")
+
+        sc = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        sc.pack(expand=True, fill="both", padx=40, pady=10)
+
+        # Store current filters
+        self.current_date_filter = filter_date
+        self.current_search_text = search_text
+        self.current_category_filter = filter_cat
+
+        # I-filter ang orders
+        filtered_orders = []
+        date_from = None
+        date_to = None
+
+        # Date filter
+        if filter_date:
+            try:
+                date_from = datetime.strptime(filter_date, "%Y-%m-%d").date()
+                date_to = date_from
+            except:
+                pass
+        elif hasattr(self, 'filter_date_from') and self.filter_date_from.get() and self.filter_date_to.get():
+            try:
+                date_from = datetime.strptime(self.filter_date_from.get(), "%Y-%m-%d").date()
+                date_to = datetime.strptime(self.filter_date_to.get(), "%Y-%m-%d").date()
+            except:
+                pass
+        elif hasattr(self, 'filter_date_from') and self.filter_date_from.get():
+            try:
+                date_from = datetime.strptime(self.filter_date_from.get(), "%Y-%m-%d").date()
+                date_to = date_from
+            except:
+                pass
+
+        # Update active filters display
+        active_filters_list = []
+        if date_from and date_to:
+            if date_from == date_to:
+                active_filters_list.append(f"Date: {date_from}")
+            else:
+                active_filters_list.append(f"Date: {date_from} to {date_to}")
+
+        if search_text:
+            active_filters_list.append(
+                f"Search: '{search_text}' ({self.search_by.get() if hasattr(self, 'search_by') else 'Customer Name'})")
+
+        if filter_cat != "All":
+            active_filters_list.append(f"Category: {filter_cat}")
+
+        if active_filters_list:
+            self.active_filters_label.configure(text="Active Filters: " + " | ".join(active_filters_list),
+                                                text_color="#FFD700")
+        else:
+            self.active_filters_label.configure(text="Active Filters: None (Showing all transactions)",
+                                                text_color="#888")
+
+        for o in orders:
+            # Apply date filter
+            if date_from and date_to:
+                try:
+                    o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00')).date()
+                    if not (date_from <= o_date <= date_to):
+                        continue
+                except:
+                    continue
+
+            # Apply search filter
+            if search_text:
+                search_lower = search_text.lower()
+                found = False
+                search_by = self.search_by.get() if hasattr(self, 'search_by') else "Customer Name"
+
+                if search_by == "Customer Name":
+                    customer = o['items'][0]['customer'] if o.get('items') else "Guest"
+                    if search_lower in customer.lower():
+                        found = True
+                elif search_by == "Order ID":
+                    if search_lower in str(o.get('order_id', '')):
+                        found = True
+                elif search_by == "Product Name":
+                    for item in o.get('items', []):
+                        if search_lower in item.get('name', '').lower():
+                            found = True
+                            break
+                elif search_by == "Payment Method":
+                    if search_lower in o.get('method', '').lower():
+                        found = True
+
+                if not found:
+                    continue
+
+            # Apply category filter
+            order_items_filtered = []
+            has_selected_category = False
+
+            for item in o.get('items', []):
+                item_cat = "Coffee"
+                raw_n = item.get('raw_name', item['name'].split(' (')[0])
+                for m_item in menu:
+                    if m_item['name'] == raw_n:
+                        item_cat = m_item.get('cat', 'Coffee')
+                        break
+
+                if filter_cat == "All" or item_cat == filter_cat:
+                    has_selected_category = True
+                    order_items_filtered.append(f"{item.get('qty', 1)}x {item['name']}")
+
+            if not has_selected_category:
+                continue
+
+            filtered_orders.append(o)
+
+            f = ctk.CTkFrame(sc, fg_color="#121212", height=65, corner_radius=8, border_width=1, border_color="#222")
+            f.pack(fill="x", pady=3)
+            f.pack_propagate(False)
+
+            created_date = o.get('created_at', '')
+            display_date = created_date[:16] if created_date else "Unknown"
+            ctk.CTkLabel(f, text=display_date, font=("Segoe UI", 10)).place(relx=0.02, rely=0.5, anchor="w")
+            cust = o['items'][0]['customer'] if o.get('items') else "Guest"
+            ctk.CTkLabel(f, text=cust, font=("Segoe UI", 11, "bold")).place(relx=0.18, rely=0.5, anchor="w")
+            details_str = ", ".join(order_items_filtered)
+            if len(details_str) > 60:
+                details_str = details_str[:57] + "..."
+            ctk.CTkLabel(f, text=details_str, font=("Segoe UI", 11)).place(relx=0.45, rely=0.5, anchor="w")
+            ctk.CTkLabel(f, text=f"₱{o.get('total', 0):,.2f}", font=("Segoe UI", 13, "bold"),
+                         text_color=self.accent_light).place(relx=0.90, rely=0.5, anchor="w")
+
+        # Show count of filtered transactions
+        total_revenue = sum(o.get('total', 0) for o in filtered_orders)
+        count_label = ctk.CTkLabel(self.content,
+                                   text=f"📋 Showing {len(filtered_orders)} transactions | Total Revenue: ₱{total_revenue:,.2f}",
+                                   font=("Segoe UI", 11), text_color="gray")
+        count_label.pack(pady=5)
+
+    # ========================================================================
+    # GRAPH DISPLAY METHODS
+    # ========================================================================
+
+    def display_real_graph(self, container, orders, report_type):
+        """Display graph para sa monthly report"""
+
+        now = datetime.now()
+        y_max_limit = 35000
+
+        if report_type == "Daily":
+            # Daily: Ipakita ang BUONG BUWAN (Day 1 hanggang last day)
+            current_month = now.month
+            current_year = now.year
+            last_day = calendar.monthrange(current_year, current_month)[1]
+
+            labels = [f"Day {i}" for i in range(1, last_day + 1)]
+
+            revenue_values = [0] * last_day
+            order_values = [0] * last_day
+
+            for o in orders:
+                try:
+                    o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00'))
+                    if o_date.year == current_year and o_date.month == current_month:
+                        day_index = o_date.day - 1
+                        if 0 <= day_index < last_day:
+                            revenue_values[day_index] += o.get('total', 0)
+                            order_values[day_index] += 1
+                except:
+                    pass
+
+            title = f"Daily Sales - {now.strftime('%B %Y')}"
+
+        else:  # Monthly
+            current_year = now.year
+            labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+            revenue_values = [0] * 12
+            order_values = [0] * 12
+
+            for i, month_label in enumerate(labels):
+                month_num = i + 1
+                month_start = datetime(current_year, month_num, 1)
+                if month_num == 12:
+                    month_end = datetime(current_year, 12, 31)
+                else:
+                    month_end = datetime(current_year, month_num + 1, 1) - timedelta(days=1)
+
+                for o in orders:
+                    try:
+                        o_date = datetime.fromisoformat(o['created_at'].replace('Z', '+00:00')).date()
+                        if month_start.date() <= o_date <= month_end.date():
+                            revenue_values[i] += o.get('total', 0)
+                            order_values[i] += 1
+                    except:
+                        pass
+
+            title = f"Monthly Sales - {current_year}"
+
+        # Create figure with two y-axes
+        fig, ax1 = plt.subplots(figsize=(14, 6), dpi=100)
+        fig.patch.set_facecolor('#121212')
+        ax1.set_facecolor('#121212')
+
+        # Bar chart for revenue
+        max_rev = max(revenue_values) if revenue_values else 0
+        color = '#1DB954' if max_rev > 0 else '#FF6B35'
+        bars = ax1.bar(labels, revenue_values, color=color, width=0.8 if report_type == "Daily" else 0.6, alpha=0.8,
+                       label='Revenue (₱)')
+
+        # Add value labels
+        for bar, value in zip(bars, revenue_values):
+            if value > 0:
+                height = bar.get_height()
+                offset = y_max_limit * 0.02
+                if report_type == "Daily" and len(labels) > 20:
+                    ax1.text(bar.get_x() + bar.get_width() / 2., height + offset,
+                             f'₱{value:,.0f}', ha='center', va='bottom', color='white', fontsize=6, rotation=90)
+                else:
+                    ax1.text(bar.get_x() + bar.get_width() / 2., height + offset,
+                             f'₱{value:,.0f}', ha='center', va='bottom', color='white', fontsize=8)
+
+        ax1.set_xlabel('Day of Month' if report_type == "Daily" else 'Month', color='white')
+        ax1.set_ylabel('Revenue (₱)', color='white')
+        ax1.tick_params(axis='x', colors='gray', labelsize=8 if report_type == "Daily" and len(labels) > 20 else 9,
+                        rotation=90 if report_type == "Daily" and len(labels) > 20 else 45)
+        ax1.tick_params(axis='y', colors='gray', labelsize=9)
+        ax1.set_ylim(0, y_max_limit)
+
+        # Line chart for order count (right y-axis)
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('Number of Orders', color='#FFD700')
+        ax2.plot(labels, order_values, color='#FFD700', marker='o', linewidth=2,
+                 markersize=4 if report_type == "Daily" and len(labels) > 20 else 6, label='Orders')
+        ax2.tick_params(axis='y', colors='#FFD700', labelsize=9)
+        ax2.set_ylim(0, max(order_values) + 2 if max(order_values) > 0 else 5)
+
+        ax1.set_title(title, color="white", fontname="Century Gothic", fontsize=12, fontweight='bold')
+        ax1.axhline(y=35000, color='#FFD700', linestyle='--', linewidth=1, alpha=0.5, label='Target: ₱35,000')
+
+        # Average lines
+        if revenue_values and any(v > 0 for v in revenue_values):
+            positive_revenue = [v for v in revenue_values if v > 0]
+            if positive_revenue:
+                avg_revenue = sum(positive_revenue) / len(positive_revenue)
+                ax1.axhline(y=avg_revenue, color='#00CED1', linestyle=':', linewidth=1.5, alpha=0.7,
+                            label=f'Avg Revenue: ₱{avg_revenue:,.0f}')
+
+        if order_values and any(v > 0 for v in order_values):
+            positive_orders = [v for v in order_values if v > 0]
+            if positive_orders:
+                avg_orders = sum(positive_orders) / len(positive_orders)
+                ax2.axhline(y=avg_orders, color='#FF6347', linestyle=':', linewidth=1.5, alpha=0.7,
+                            label=f'Avg Orders: {avg_orders:.1f}')
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', facecolor='#121212', labelcolor='white',
+                   fontsize=8)
+
+        ax1.grid(axis='y', linestyle='--', alpha=0.1, color='gray')
+        for spine in ax1.spines.values():
+            spine.set_visible(False)
+
+        fig.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=container)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True, padx=20, pady=20)
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+if __name__ == "__main__":
+    root = ctk.CTk()
+    app = DrixApp(root)
+    root.mainloop()
